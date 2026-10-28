@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">学习bot</string>
+    <string name="settings_title">设置</string>
+
+    <string name="nav_today">今日</string>
+    <string name="nav_plan">计划</string>
+    <string name="nav_goals">目标</string>
+    <string name="nav_quiz">题库</string>
+    <string name="nav_chat">聊天</string>
+    <string name="nav_note">笔记</string>
+
+    <string name="sync">同步</string>
+    <string name="syncing">正在同步…</string>
+    <string name="never_synced">还没同步</string>
+    <string name="sync_failed">同步失败：%s</string>
+    <string name="no_config">先在「设置」里填服务器地址和 token</string>
+
+    <string name="empty_today">今天没有排任务。电脑端点「重新排计划」。</string>
+    <string name="empty_plan">未来 14 天没有排课。</string>
+    <string name="empty_goals">还没有目标。电脑端导入目标后同步。</string>
+    <string name="empty_quiz">还没有答题记录。</string>
+    <string name="empty_day">没有排课</string>
+</resources>

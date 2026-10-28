@@ -1,0 +1,18 @@
+[Unit]
+Description=学习bot 服务端（HTTP API；Telegram 已摘，默认不跑 bot）
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/studybot
+ExecStart=/usr/bin/python3 /opt/studybot/server/run.py --port 8787 --bind 0.0.0.0
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 只给需要的权限
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

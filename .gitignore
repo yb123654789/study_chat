@@ -1,0 +1,49 @@
+# 密钥
+.env
+data/server.json
+data/desktop.json
+
+# 个人数据：整个 data/ 不进库，但保留测试要用的目标文件
+data/*
+!data/goals.json
+!data/goals_*.json
+
+# 资料原文 / 抽好的文本（版权 + 体积）
+materials/
+extracted/
+shots/
+
+# 运行产物
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+crash.log
+*.log
+.tmp-test/
+data/_srv/
+data/_selftest/
+data/_shot/
+data/backups/
+data/exports/
+
+# 打包产物（spec 要留，工作目录和 exe 不留）
+dist/
+build/*/
+!build/*.spec
+
+# Android 构建产物与签名
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/keystore/
+
+# 外部工具二进制（各自机器装，别进库）
+tools/bin/
+
+# 系统杂项
+.DS_Store
+Thumbs.db

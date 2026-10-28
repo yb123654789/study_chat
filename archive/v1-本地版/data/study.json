@@ -1,0 +1,388 @@
+{
+  "version": 1,
+  "topics": [
+    {
+      "id": "t001",
+      "subject": "英语",
+      "title": "雅思核心词 list 3（60 词）",
+      "source": "",
+      "tags": [
+        "词汇"
+      ],
+      "created": "2026-10-15",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-26",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 0,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t002",
+      "subject": "英语",
+      "title": "雅思听力 Section 2 地图题技巧",
+      "source": "",
+      "tags": [
+        "听力"
+      ],
+      "created": "2026-10-16",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-23",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 1,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t003",
+      "subject": "数学",
+      "title": "拉格朗日中值定理",
+      "source": "",
+      "tags": [
+        "高数",
+        "定理"
+      ],
+      "created": "2026-10-17",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-26",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 0,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t004",
+      "subject": "数学",
+      "title": "矩阵特征值求法",
+      "source": "",
+      "tags": [
+        "线代"
+      ],
+      "created": "2026-10-18",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-24",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 0,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "source": "",
+      "tags": [
+        "SQL"
+      ],
+      "created": "2026-10-19",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-26",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 0,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t006",
+      "subject": "编程",
+      "title": "Python 生成器与 yield 执行过程",
+      "source": "",
+      "tags": [
+        "Python"
+      ],
+      "created": "2026-10-20",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-23",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 1,
+        "last": "2026-10-21"
+      }
+    },
+    {
+      "id": "t007",
+      "subject": "物理",
+      "title": "牛顿第二定律的适用条件",
+      "source": "",
+      "tags": [
+        "力学"
+      ],
+      "created": "2026-10-21",
+      "status": "learning",
+      "note": "",
+      "review": {
+        "due": "2026-10-26",
+        "interval": 3,
+        "reps": 2,
+        "ease": 2.4,
+        "lapses": 0,
+        "last": "2026-10-21"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "id": "s001",
+      "date": "2026-10-04T18:03",
+      "topic": "t004",
+      "subject": "数学",
+      "title": "矩阵特征值求法",
+      "minutes": 25,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s002",
+      "date": "2026-10-05T11:02",
+      "topic": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "minutes": 25,
+      "quality": 4,
+      "note": ""
+    },
+    {
+      "id": "s003",
+      "date": "2026-10-06T16:27",
+      "topic": "t001",
+      "subject": "英语",
+      "title": "雅思核心词 list 3（60 词）",
+      "minutes": 25,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s004",
+      "date": "2026-10-08T17:25",
+      "topic": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "minutes": 25,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s005",
+      "date": "2026-10-09T14:09",
+      "topic": "t003",
+      "subject": "数学",
+      "title": "拉格朗日中值定理",
+      "minutes": 50,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s006",
+      "date": "2026-10-10T17:36",
+      "topic": "t001",
+      "subject": "英语",
+      "title": "雅思核心词 list 3（60 词）",
+      "minutes": 25,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s007",
+      "date": "2026-10-11T08:39",
+      "topic": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "minutes": 25,
+      "quality": 4,
+      "note": ""
+    },
+    {
+      "id": "s008",
+      "date": "2026-10-12T13:29",
+      "topic": "t007",
+      "subject": "物理",
+      "title": "牛顿第二定律的适用条件",
+      "minutes": 50,
+      "quality": 4,
+      "note": ""
+    },
+    {
+      "id": "s009",
+      "date": "2026-10-12T12:15",
+      "topic": "t003",
+      "subject": "数学",
+      "title": "拉格朗日中值定理",
+      "minutes": 25,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s010",
+      "date": "2026-10-13T15:56",
+      "topic": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "minutes": 30,
+      "quality": 4,
+      "note": ""
+    },
+    {
+      "id": "s011",
+      "date": "2026-10-13T17:04",
+      "topic": "t003",
+      "subject": "数学",
+      "title": "拉格朗日中值定理",
+      "minutes": 25,
+      "quality": 4,
+      "note": ""
+    },
+    {
+      "id": "s012",
+      "date": "2026-10-14T22:31",
+      "topic": "t002",
+      "subject": "英语",
+      "title": "雅思听力 Section 2 地图题技巧",
+      "minutes": 45,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s013",
+      "date": "2026-10-14T09:48",
+      "topic": "t006",
+      "subject": "编程",
+      "title": "Python 生成器与 yield 执行过程",
+      "minutes": 50,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s014",
+      "date": "2026-10-15T15:37",
+      "topic": "t005",
+      "subject": "编程",
+      "title": "SQL 窗口函数 row_number / rank",
+      "minutes": 45,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s015",
+      "date": "2026-10-15T09:17",
+      "topic": "t007",
+      "subject": "物理",
+      "title": "牛顿第二定律的适用条件",
+      "minutes": 45,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s016",
+      "date": "2026-10-16T17:43",
+      "topic": "t006",
+      "subject": "编程",
+      "title": "Python 生成器与 yield 执行过程",
+      "minutes": 45,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s017",
+      "date": "2026-10-16T14:56",
+      "topic": "t006",
+      "subject": "编程",
+      "title": "Python 生成器与 yield 执行过程",
+      "minutes": 30,
+      "quality": 2,
+      "note": ""
+    },
+    {
+      "id": "s018",
+      "date": "2026-10-18T08:13",
+      "topic": "t004",
+      "subject": "数学",
+      "title": "矩阵特征值求法",
+      "minutes": 30,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s019",
+      "date": "2026-10-20T10:28",
+      "topic": "t001",
+      "subject": "英语",
+      "title": "雅思核心词 list 3（60 词）",
+      "minutes": 45,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s020",
+      "date": "2026-10-20T21:27",
+      "topic": "t002",
+      "subject": "英语",
+      "title": "雅思听力 Section 2 地图题技巧",
+      "minutes": 50,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s021",
+      "date": "2026-10-23T10:05",
+      "topic": "t002",
+      "subject": "英语",
+      "title": "雅思听力 Section 2 地图题技巧",
+      "minutes": 25,
+      "quality": 3,
+      "note": ""
+    },
+    {
+      "id": "s022",
+      "date": "2026-10-23T18:14",
+      "topic": "t002",
+      "subject": "英语",
+      "title": "雅思听力 Section 2 地图题技巧",
+      "minutes": 25,
+      "quality": 4,
+      "note": ""
+    }
+  ],
+  "notes": [
+    {
+      "id": "n001",
+      "date": "2026-10-21",
+      "subject": "英语",
+      "text": "听力地图题：先看方位词 north/south，再抓 relative to 的参照物"
+    },
+    {
+      "id": "n002",
+      "date": "2026-10-22",
+      "subject": "数学",
+      "text": "中值定理三兄弟的区别老是混，要画图对比"
+    },
+    {
+      "id": "n003",
+      "date": "2026-10-23",
+      "subject": "编程",
+      "text": "yield 的本质：函数冻结在 yield 处，next 才继续"
+    }
+  ]
+}

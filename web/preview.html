@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>预览 · 学习bot</title>
+<style>
+  :root {
+    --bg: #0f1116;
+    --panel: #161922;
+    --line: #262b36;
+    --ink: #e9ecf2;
+    --muted: #8d95a5;
+    --accent: #6e9bff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; align-items: center; justify-content: center; gap: 40px;
+    padding: 32px;
+  }
+  .side { width: 300px; }
+  .side h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: .2px; }
+  .side p { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .side ol { margin: 0 0 22px; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .side ol b { color: var(--ink); font-weight: 600; }
+  .side li { margin-bottom: 8px; }
+  .row { display: flex; gap: 8px; margin-bottom: 14px; }
+  .row button {
+    flex: 1; height: 36px; border-radius: 9px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: inherit; font-size: 13px;
+  }
+  .row button.on { border-color: var(--accent); color: var(--accent); background: #1a2338; font-weight: 600; }
+  .open { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; font-size: 13px; }
+  .open:hover { text-decoration: underline; }
+  .tip { margin-top: 18px; font-size: 12px; color: #6f7686; border-top: 1px solid var(--line); padding-top: 14px; }
+
+  .frame {
+    width: 390px; height: 844px; border-radius: 42px; border: 10px solid #1d212a;
+    background: #000; box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 0 1px #2a2f3a inset, 0 0 0 1px #2a2f3a;
+    overflow: hidden; flex: none; transition: width .15s, height .15s;
+  }
+  .frame iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+
+  @media (max-width: 820px) {
+    body { padding: 0; gap: 0; }
+    .side { display: none; }
+    .frame { width: 100vw; height: 100vh; border-radius: 0; border: 0; }
+  }
+</style>
+</head>
+<body>
+
+<aside class="side">
+  <h1>学习bot · 预览</h1>
+  <p>右手边是真实页面，按手机尺寸渲染。</p>
+  <ol>
+    <li><b>点卡片</b>「开始学习」→ 进聊天窗口，跟带练聊这一节</li>
+    <li>聊完说「<b>出题</b>」→ 3 题，答错 2 题看「明天补」</li>
+    <li><b>切 1 小时</b> → 看容量不够时怎么说</li>
+    <li><b>切底部「计划」</b> → 看未来 3 周</li>
+  </ol>
+  <div class="row">
+    <button data-w="375" class="on">375</button>
+    <button data-w="390">390</button>
+    <button data-w="414">414</button>
+  </div>
+  <a class="open" href="./" target="_blank">在新标签页打开 →</a>
+  <div class="tip">
+    这是预览版：题库只写了 g01–g06，简答按关键词判，进度存在本地。
+    真机手感（字体渲染、拇指距离）以手机为准。
+  </div>
+</aside>
+
+<div class="frame" id="frame">
+  <iframe src="./" title="学习bot 预览"></iframe>
+</div>
+
+<script>
+  const frame = document.getElementById('frame');
+  document.querySelectorAll('[data-w]').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('[data-w]').forEach((x) => x.classList.remove('on'));
+      b.classList.add('on');
+      const w = Number(b.dataset.w);
+      frame.style.width = w + 'px';
+      frame.style.height = Math.round((w * 844) / 390) + 'px';
+    });
+  });
+</script>
+</body>
+</html>

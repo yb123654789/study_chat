@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_today"
+        android:icon="@drawable/ic_today"
+        android:title="@string/nav_today" />
+    <item
+        android:id="@+id/nav_plan"
+        android:icon="@drawable/ic_plan"
+        android:title="@string/nav_plan" />
+    <item
+        android:id="@+id/nav_goals"
+        android:icon="@drawable/ic_goals"
+        android:title="@string/nav_goals" />
+    <item
+        android:id="@+id/nav_quiz"
+        android:icon="@drawable/ic_quiz"
+        android:title="@string/nav_quiz" />
+    <item
+        android:id="@+id/nav_chat"
+        android:icon="@drawable/ic_chat"
+        android:title="@string/nav_chat" />
+    <item
+        android:id="@+id/nav_note"
+        android:icon="@drawable/ic_note"
+        android:title="@string/nav_note" />
+</menu>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只把 filesDir/notes/ 暴露给相机写照片（笔记照片，P5） -->
+<paths>
+    <files-path
+        name="notes"
+        path="notes/" />
+</paths>
