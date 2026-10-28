@@ -122,6 +122,9 @@ DeepSeek key（P2 前给到即可）。
 
 ## P8 打包检查 + 真机验收清单（2026-10-28 晚）
 
+**已发布**：仓库 <https://github.com/yb123654789/study_chat>（只推源码/文档/构建配置；`data/`、`materials/`、`extracted/`、`shots/`、`android/keystore/` 都已 ignore）。
+Release **v0.1.0**：`StudyBot-android-v0.1.0.apk`（47.8 MB）、`StudyBot-desktop-win64.zip`（13.8 MB）。
+
 **已完成（不需要手机）**
 
 - `assembleRelease` 出 `android/app/build/outputs/apk/release/app-release.apk`，51 MB，`apksigner` 校验通过
