@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -108,6 +109,9 @@ def window(src: str, anchor: str, text: str, size: int = 700) -> list[dict]:
 def load_blocks() -> list[dict]:
     blocks = []
     for p in sorted(EXTRACTED.rglob("*.txt")):
+        # 旧版本让位后改名成 *.old.txt：留着能翻回来，但不进检索
+        if p.name.endswith(".old.txt"):
+            continue
         try:
             raw = p.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -142,10 +146,17 @@ def load_blocks() -> list[dict]:
             b["rel"] = rel
 
     out = []
+    seen_text: set[str] = set()
     for b in blocks:
         t = re.sub(r"\s+", "", b["text"])
         if not (80 <= len(t) <= 900) or cjk_ratio(t) < 0.25:
             continue
+        # 同一段话在 PPT 和教材里各有一份（或同一份资料重复入库）：只留一份，
+        # 否则检索会把两份几乎一样的段落都塞给模型。
+        key = hashlib.sha1(t.encode("utf-8")).hexdigest()
+        if key in seen_text:
+            continue
+        seen_text.add(key)
         out.append({**b, "text": t})
     return out
 

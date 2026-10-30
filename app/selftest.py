@@ -481,6 +481,16 @@ def run() -> int:
     check("自动重排只提落后的课", bool(r18) and "高等数学" in r18["brief"], str(r18))
     check("重排后数学落后归零", d.lag_days("math") == 0, str(d.lag_days("math")))
 
+    # 18b. 跨课程每天总预算：超了才分，分配给各课，写进计划说明
+    d.set("day_total_cap", "20")
+    budgets = engine._course_budgets(d, ["ds", "math"], dt.date.today())
+    check("总预算超了会分", bool(budgets) and sum(budgets.values()) <= 20, str(budgets))
+    check("两门课都分到", all(budgets.get(c, 0) >= 1 for c in ("ds", "math")), str(budgets))
+    rb = engine.regenerate(d)
+    check("总预算写进计划说明", "每天总共 20 分钟" in rb["note"], rb["note"][:160])
+    d.set("day_total_cap", "0")
+    check("总预算 0 不分", engine._course_budgets(d, ["ds", "math"], dt.date.today()) == {})
+
     # 19. 数据层规则：schema 版本 / 热备份 / 导出 / 数据目录
     check("schema 带版本号", d.get("schema_version") == str(dbmod.SCHEMA_VERSION),
           d.get("schema_version"))

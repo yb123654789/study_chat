@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import queue
+import socket
 import threading
 import time
 import tkinter as tk
@@ -1648,6 +1650,33 @@ class SettingsPage(tk.Frame):
         self.app = app
         self.db = app.db
 
+        # 手机连接：地址和 token 放最上面。地址会随路由器变，token 存在文件里，
+        # 别让人再去翻 server.json / desktop.json。
+        cc = card(self)
+        cc.pack(fill="x", pady=(0, 12))
+        label(cc.inner, "手机连接（照抄到手机 App 的「设置」）", 11, True).pack(
+            anchor="w", pady=(0, 8))
+        rowu = tk.Frame(cc.inner, bg=CARD)
+        rowu.pack(fill="x", pady=2)
+        label(rowu, "地址", 9, False, MUTED, CARD, width=5, anchor="w").pack(side="left")
+        self.conn_url = label(rowu, "…", 10, True, ACCENT, CARD, anchor="w")
+        self.conn_url.pack(side="left")
+        button(rowu, "复制地址", lambda: self._copy(self.conn_url.cget("text")),
+               "ghost").pack(side="right")
+        rowt = tk.Frame(cc.inner, bg=CARD)
+        rowt.pack(fill="x", pady=2)
+        label(rowt, "Token", 9, False, MUTED, CARD, width=5, anchor="w").pack(side="left")
+        self.conn_token = label(rowt, "…", 10, True, TEXT, CARD, anchor="w")
+        self.conn_token.pack(side="left")
+        button(rowt, "复制 Token", lambda: self._copy(self.conn_token.cget("text")),
+               "ghost").pack(side="right")
+        self.conn_note = label(cc.inner, "", 8, False, MUTED, CARD, anchor="w",
+                               justify="left")
+        self.conn_note.pack(fill="x", pady=(6, 0))
+        rowr = tk.Frame(cc.inner, bg=CARD)
+        rowr.pack(fill="x", pady=(6, 0))
+        button(rowr, "刷新", self.refresh_conn, "ghost").pack(side="left")
+
         # 当前课程（考核日 / 周末系数 / 每日上限都按课存；每天多少分钟由排程算，不存）
         c0 = card(self)
         c0.pack(fill="x")
@@ -1666,6 +1695,22 @@ class SettingsPage(tk.Frame):
             anchor="w", pady=(8, 0))
         button(row1, "保存这门课", self.save_course).pack(side="left")
         button(row1, "重排这门课", self.replan_course, "ghost").pack(side="left", padx=8)
+
+        # 跨课程总预算：几门课一起跑时，一天总共学多久
+        ct = card(self)
+        ct.pack(fill="x", pady=(12, 0))
+        label(ct.inner, "每天总共学多久（所有课加起来）", 11, True).pack(
+            anchor="w", pady=(0, 10))
+        rowt = tk.Frame(ct.inner, bg=CARD)
+        rowt.pack(fill="x")
+        self.f_total = self._field_row(rowt, "每天总预算分钟（0 = 不限）", 14)
+        rowt2 = tk.Frame(ct.inner, bg=CARD)
+        rowt2.pack(fill="x", pady=(12, 0))
+        button(rowt2, "保存并重排全部", self.save_total).pack(side="left")
+        label(ct.inner,
+              "设了以后：先算每门课每天需要多少；总和超了，就按离考核日远近分。"
+              "单张卡不能拆，某天可能比预算多出一张卡的量。",
+              8, False, MUTED, CARD).pack(anchor="w", pady=(8, 0))
 
         # 新增课程
         c1 = card(self)
@@ -1770,6 +1815,64 @@ class SettingsPage(tk.Frame):
         e.delete(0, "end")
         e.insert(0, str(value))
 
+    # ---------------------------------------------------------------- 手机连接
+    def _lan_ip(self) -> str:
+        """本机在局域网里的地址，手机要填的就是它。"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.settimeout(0.3)
+                s.connect(("223.5.5.5", 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            pass
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
+
+    def _conn_info(self) -> tuple[str, str, str]:
+        """(地址, token, 来源说明)。瘦客户端看 desktop.json，本地看 server.json。"""
+        p = paths.desktop_config()
+        cfg: dict = {}
+        if p.exists():
+            try:
+                cfg = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cfg = {}
+        server = str(cfg.get("server") or "").rstrip("/")
+        if server:
+            return server, str(cfg.get("token") or ""), f"desktop.json：{p}"
+        sp = paths.server_config()
+        token = ""
+        if sp.exists():
+            try:
+                token = str(json.loads(sp.read_text(encoding="utf-8")).get("token") or "")
+            except (OSError, ValueError):
+                token = ""
+        return f"http://{self._lan_ip()}:8787", token, f"server.json：{sp}"
+
+    def refresh_conn(self) -> None:
+        url, token, src = self._conn_info()
+        self.conn_url.configure(text=url)
+        self.conn_token.configure(text=token or "（还没有 token：先跑一次 server/run.py）")
+        self.conn_note.configure(
+            text=f"来源：{src}\n"
+                 "地址会变：路由器重新分配 IP 时这里跟着变，手机填新的那串就行。\n"
+                 "token 不会自己变：只有删掉 server.json 再启动服务端，才会重新生成。\n"
+                 "手机和电脑要同一个 WiFi；连不上先确认电脑上跑着 server/run.py（端口 8787）。")
+
+    def _copy(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text or text.startswith("（"):
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update_idletasks()
+        self.app.toast("已复制", "ok")
+
     def refresh(self):
         c = self.db.course(self.app.course_id()) or {}
         self._fill(self.f_name, c.get("name") or self.app.course_id())
@@ -1778,6 +1881,7 @@ class SettingsPage(tk.Frame):
         self._fill(self.f_cap, c.get("day_cap") if c.get("day_cap") is not None
                    else self.db.geti("day_cap", 0))
         self._fill(self.f_lang, self.db.get(f"lang:{self.app.course_id()}", "zh") or "zh")
+        self._fill(self.f_total, self.db.geti("day_total_cap", 0))
         self._fill(self.f_key, self.db.get("api_key", ""))
         self._fill(self.f_model, self.db.get("model", "deepseek-flash"))
         self._fill(self.f_tess, self.db.get("tesseract_path", ""))
@@ -1788,6 +1892,7 @@ class SettingsPage(tk.Frame):
         self._fill(self.f_td, self.db.get("tessdata_dir", ""))
         last = self.db.get("last_backup", "") or "还没备份过"
         self.data_lbl.configure(text=f"{paths._r()}\n上次备份：{last}")
+        self.refresh_conn()
 
     def save_course(self):
         cid = self.app.course_id()
@@ -1817,6 +1922,18 @@ class SettingsPage(tk.Frame):
             self.db.set("exam_date", exam)
             self.db.set("weekend_ratio", str(ratio))
             self.db.set("day_cap", str(cap))
+
+    def save_total(self):
+        try:
+            cap = int(self.f_total.get().strip() or 0)
+        except ValueError:
+            return self.app.toast("总预算要填整数分钟，0 = 不限", "warn")
+        cap = max(0, min(600, cap))
+        self.db.set("day_total_cap", str(cap))
+        self.app.run_bg(
+            lambda: engine.regenerate(self.db),
+            lambda r: (self.app.toast(r["note"], "ok"), self.refresh()),
+            tag="replan-all")
 
     def add_course(self):
         cid = self.n_id.get().strip().lower()

@@ -11,6 +11,10 @@
 > 桌面「机器人」页换成「待确认」页，key 只在「设置」里填（不再读 `.env`），`review_queue`（schema v5）。
 > 手机端方向改为**原生 Android App**，方案 `手机App方案.md`（v5）、施工 `施工计划.md`（P0–P8）。
 > 现状、坑、下一步一律以 `HANDOFF.md` 最新一节为准；本节以下关于 Telegram/推送的描述是 P0 之前的。
+>
+> **2026-10-30 手机端 v0.2.0**：只留单窗口自由聊天（启动即聊、不绑卡，AI 结合今日任务商量学什么）；
+> 首句 null 已修；语音加了自检和系统语音输入回退；多课程改成「每天总预算、按考核日远近分」；
+> 资料同名旧版自动让位（`*.old.txt`，不删）。细节看 `HANDOFF.md` 最新一节。
 
 **形态**：不做网页，不做 PWA，不用 Supabase。
 **后端跑在境外 VPS**（宿舍晚上断电断网，本机和家里小主机都会停），桌面软件只做显示和操作。
@@ -22,7 +26,7 @@
   → **带练聊天**（`app/chat.py`：会话落库、状态条、检索引用、工具调用，两端共用）
   → **服务端**（`server/run.py` + `server/api.py`：HTTP API；Telegram 降为 `--bot` 应急）
   → **瘦客户端**（`app/remote.py`：桌面所有读写走 HTTP，10 页跑通）
-- 自检：`app\selftest.py`（125 项）、`app\uismoke.py`（14 项：10 页 + 待确认 + key 提示 + 课程下拉）、`server\test_api.py`（35 项）、`tools/test_planner.py`
+- 自检：`app\selftest.py`（129 项）、`app\uismoke.py`（15 项）、`server\test_api.py`（55 项）、`tools/test_planner.py`、`tools/test_budget.py`
 - 2026-10-27 补齐：落后自动重排（`engine.auto_replan`）、复习卡不许早于新课、错题回炉（连续两次没过停止换题）、带练上下文预算；细节见 HANDOFF
 - 2026-10-27 多课程：`courses` 表（每课自己的考核日），`goals`/`tasks` 带 `course` 列（数据结构 = `ds`），
   按课排程/落后/过滤/推送分组；新课程目标放 `data/goals_<id>.json`，资料放 `materials/<id>/`（`tools/extract.py --course <id>`）

@@ -112,6 +112,19 @@ if over:
 if not capped["uncovered"]:
     fails.append("每日上限压不住时没有报「排不下」")
 
+# 12. daily_budget（跨课程分到的日均）：只压目标，不硬砍单张大卡；排不下要明说
+budgeted = P.schedule(goals, start, deadline, daily_budget=45)
+if budgeted["daily_avg"] >= res["daily_avg"]:
+    fails.append(f"设了 daily_budget 日均没降: {budgeted['daily_avg']} vs {res['daily_avg']}")
+if budgeted["daily_avg"] > 55:                 # 45 + 一张大卡的量，允许一点超出
+    fails.append(f"daily_budget 超太多: {budgeted['daily_avg']}")
+if not budgeted["uncovered"]:
+    fails.append("daily_budget 压住时没有报「排不下」")
+
+# 13. daily_budget=0 等于没设，计划必须和不传时一模一样
+if P.schedule(goals, start, deadline, daily_budget=0)["daily_avg"] != res["daily_avg"]:
+    fails.append("daily_budget=0 改变了原计划")
+
 print("目标数", len(goals), "| 排入", len(scheduled), "| 未排入", len(res["uncovered"]),
       "| 日均", res["daily_avg"], "分钟")
 print("FAILS:", fails if fails else "无 ✅")

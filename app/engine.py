@@ -76,6 +76,75 @@ def _in_flight(db) -> set[int]:
     return keep
 
 
+def _course_budgets(db, cids: list[str], start_d: dt.date) -> dict[str, int]:
+    """跨课程总预算怎么分：每天总共多少分钟，按「离考核日远近」分给各课。
+
+    没设 day_total_cap（0）或各课自己都排得下 → 返回 {}（保持各排各的）。
+    超了才分：离考核越近权重越大（1 / 剩余天数），分到「这门课本来需要的日均」为止，
+    剩下的再分给别的课。单张卡不能拆，所以某天可能比预算多出一张卡的量。
+    """
+    cap = int(db.geti("day_total_cap", 0) or 0)
+    if cap <= 0:
+        return {}
+    rows = []
+    for cid in cids:
+        c = db.course(cid) or {}
+        try:
+            exam = dt.date.fromisoformat(str(c.get("exam_date") or ""))
+        except ValueError:
+            continue
+        days = (exam - start_d).days + 1
+        if days < 3:
+            continue
+        done = db.done_goal_ids(cid)
+        need = sum(int(g["m"]) + 10 for g in db.goals(course=cid) if g["id"] not in done)
+        if need <= 0:
+            continue
+        rate = need / days                      # 这门课本来每天要学多少
+        rows.append({"cid": cid, "days": days, "left": float(rate), "rate": rate,
+                     "name": c.get("name") or cid})
+    if not rows:
+        return {}
+    if sum(r["rate"] for r in rows) <= cap:      # 都排得下，不用互相挤
+        return {}
+
+    alloc = {r["cid"]: 0.0 for r in rows}
+    left = float(cap)
+    active = list(rows)
+    for _ in range(len(rows) + 3):
+        if not active or left <= 0.5:
+            break
+        wsum = sum(1.0 / r["days"] for r in active) or 1.0
+        shares = {r["cid"]: left * (1.0 / r["days"]) / wsum for r in active}
+        moved = False
+        for r in list(active):
+            give = min(r["left"], shares[r["cid"]])
+            if give <= 0.5:
+                active.remove(r)
+                continue
+            alloc[r["cid"]] += give
+            r["left"] -= give
+            left -= give
+            moved = True
+            if r["left"] <= 0.5:             # 这门课已经分够它需要的量
+                active.remove(r)
+        if not moved:
+            break
+    return {cid: max(1, int(round(v))) for cid, v in alloc.items() if v >= 1}
+
+
+def _budget_note(db, budgets: dict[str, int], cap: int) -> str:
+    if cap <= 0:
+        return ""
+    if not budgets:
+        return f"每天总预算 {cap} 分钟：各门课各自都排得下，不用互相挤"
+    bits = []
+    for cid, minutes in budgets.items():
+        c = db.course(cid) or {}
+        bits.append(f"{c.get('name') or cid} {minutes}")
+    return f"每天总共 {cap} 分钟，按考核日远近分：{' / '.join(bits)}"
+
+
 def regenerate(db, start: dt.date | None = None, course: str | None = None) -> dict:
     """重新排程：已完成的不动，未完成的从今天起重排。
 
@@ -87,7 +156,11 @@ def regenerate(db, start: dt.date | None = None, course: str | None = None) -> d
     cids = [course] if course else [c["id"] for c in db.courses()]
     if not cids:
         raise RuntimeError("还没有课程：先在「设置」页加一门课")
-    parts = [p for p in (_regen_one(db, cid, start) for cid in cids) if p]
+    start_d = start or now().date()
+    # 只有「重排全部」时才按总预算分；单课重排不抢别的课的量
+    budgets = _course_budgets(db, cids, start_d) if not course else {}
+    parts = [p for p in (_regen_one(db, cid, start, budget=budgets.get(cid, 0))
+                         for cid in cids) if p]
     if not parts:
         note = "；".join(db.get(f"plan_note:{cid}", "") for cid in cids) or "没有可排的课程"
         db.set("plan_note", note)
@@ -95,6 +168,15 @@ def regenerate(db, start: dt.date | None = None, course: str | None = None) -> d
                 "days": 0, "replaced": 0, "parts": []}
 
     note = "；".join(p["note"] for p in parts)
+    cap = int(db.geti("day_total_cap", 0) or 0)
+    budget_line = _budget_note(db, budgets, cap) if not course else ""
+    if budget_line:
+        note = budget_line + "；" + note
+    if cap and budgets:
+        actual = sum(int(p.get("daily_avg") or 0) for p in parts)
+        if actual > cap * 1.1:
+            note += (f"；实际各课日均加起来约 {actual} 分钟"
+                     f"（单张卡不能拆，会比预算多一点）")
     db.set("plan_note", note)
     db.set("plan_generated_at", now().strftime("%Y-%m-%d %H:%M:%S"))
     db.log(f"生成计划：{note}", "ok")
@@ -106,8 +188,11 @@ def regenerate(db, start: dt.date | None = None, course: str | None = None) -> d
             "note": note, "parts": parts}
 
 
-def _regen_one(db, cid: str, start: dt.date | None) -> dict | None:
-    """只重排一门课。没有目标就只写一句说明，不报错。"""
+def _regen_one(db, cid: str, start: dt.date | None, budget: int = 0) -> dict | None:
+    """只重排一门课。没有目标就只写一句说明，不报错。
+
+    budget：跨课程总预算分给这门课的日均分钟（0 = 不设）。
+    """
     c = db.course(cid) or {}
     name = c.get("name") or cid
     goals = db.goals(course=cid)
@@ -133,7 +218,7 @@ def _regen_one(db, cid: str, start: dt.date | None) -> dict | None:
     ratio = max(100, min(200, ratio))
     day_cap = int(c.get("day_cap") or db.geti("day_cap", 0))
     res = planner.schedule(active, start_d, exam, weekend_weight=ratio / 100.0,
-                           day_cap=max(0, day_cap))
+                           day_cap=max(0, day_cap), daily_budget=max(0, int(budget)))
 
     today = start_d.isoformat()
     before = db.q1("SELECT COUNT(*) n FROM tasks WHERE date>=? AND state='todo' AND course=?",
@@ -174,10 +259,14 @@ def _regen_one(db, cid: str, start: dt.date | None) -> dict | None:
     note = (f"{name}：排入 {inserted} 张卡 / {total_min} 分钟，"
             f"日均 {per_day} 分钟（剩 {need_min} 分钟 ÷ {left_days} 天，周末 ×{ratio / 100:.1f}"
             + (f"，每日上限 {day_cap} 分钟" if day_cap else "")
+            + (f"，总预算分到 {budget} 分钟/天" if budget else "")
             + f"），覆盖到 {exam}；已完成 {len(done)} 个目标不再重排")
     if uncovered:
         core = [g["id"] for g in uncovered if g["p"] == "core"]
-        if day_cap:
+        if budget:
+            note += (f"；⚠️ 总预算只分到 {budget} 分钟/天，还有 {len(uncovered)} 个目标排不下"
+                     f"（核心 {len(core)} 个），要保全部就调高总预算或砍范围")
+        elif day_cap:
             note += (f"；⚠️ 还有 {len(uncovered)} 个目标排不下（核心 {len(core)} 个），"
                      f"每天 {day_cap} 分钟的上限压住了，先调高上限或砍范围")
         else:
@@ -229,14 +318,16 @@ def auto_replan(db) -> dict | None:
 
     briefs: list[str] = []
     total_lag = 0
-    for c in db.courses():
+    courses = db.courses()
+    budgets = _course_budgets(db, [c["id"] for c in courses], now().date())
+    for c in courses:
         cid = c["id"]
         late = overdue(db, cid)
         if not late:
             continue
         lag = len({t["date"] for t in late})
         before = _profile(_open_cards(db, today, "9999-12-31", cid))
-        res = _regen_one(db, cid, None)
+        res = _regen_one(db, cid, None, budget=budgets.get(cid, 0))
         if res is None:
             continue
         after_rows = _open_cards(db, today, "9999-12-31", cid)
@@ -438,6 +529,13 @@ def ingest_inbox(db, progress=None, course: str | None = None) -> dict:
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
         dst = out_dir / (p.stem + ".txt")
+        if dst.exists():
+            try:
+                old = dst.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                old = ""
+            if old.strip() and old.strip() != txt.strip():
+                dst = out_dir / f"{p.stem}-{h[:6]}.txt"
         dst.write_text(txt, encoding="utf-8")
         db.add_material(rel, h, len(txt), "ready")
         db.log(f"入库 {p.name}：{len(txt):,} 字符", "ok")
@@ -510,7 +608,7 @@ DERIVE_MAX_GOALS = 12       # 一块资料最多拆几个目标；宁可少而�
 DERIVE_MAX_CHUNKS = 8       # 一次最多拆几块（再大就让人分批，免得一口气烧钱）
 GOAL_MINUTES = (10, 120)    # 单个目标估时的合法范围
 
-SYSTEM_SPLIT = """你是学习内容的结构化专家。给你一门课的**新资料**片段，以及这门课**已有目标的标题**。
+SYSTEM_SPLIT = """你是学习内容的结构化专家。给你一门课的**新资料**片段，以及这门课**已有目标的标题和验收点**。
 把新资料拆成可执行、可验收的学习目标，只输出已有目标没覆盖到的新目标。
 
 规则：
@@ -519,14 +617,20 @@ SYSTEM_SPLIT = """你是学习内容的结构化专家。给你一门课的**新
 3. 覆盖资料里的核心概念；铺垫/背景标 support；与考核无关的细枝末节标 optional。
 4. 有先后依赖的写进 deps，用本次输出的本地 id（n1、n2…）；依赖已有目标的留空。
 5. 估时宁多勿少：你估 20 分钟的内容，真实往往要 35 分钟。
-6. 最多 {max_goals} 个，宁可少而准，不要凑数。
-7. 只输出 JSON，不要任何解释文字。"""
+6. **语义重复的不要再输出**：哪怕换了说法（「二叉树遍历」和「二叉树的遍历方式」算同一个），
+   只要已有目标已经覆盖，就跳过；不要为了凑数换标题重出一遍。
+7. 最多 {max_goals} 个，宁可少而准，不要凑数。
+8. 只输出 JSON，不要任何解释文字。"""
 
 
-def _derive_user(subject: str, exam: str, existing: list[str], text: str) -> str:
-    titles = "\n".join(f"- {t}" for t in existing[:200]) or "（还没有目标）"
+def _derive_user(subject: str, exam: str, existing: list[dict], text: str) -> str:
+    lines = []
+    for g in existing[:200]:
+        cps = "；".join(str(x) for x in (g.get("cp") or [])[:3])
+        lines.append(f"- {g.get('title', '')}" + (f"（验收点：{cps}）" if cps else ""))
+    titles = "\n".join(lines) or "（还没有目标）"
     return (f"科目：{subject}\n考核日：{exam}\n\n"
-            f"已有目标（这些不要再拆）：\n{titles}\n\n"
+            f"已有目标（这些不要再拆，换说法的重复项也不要）：\n{titles}\n\n"
             f"新资料：\n---\n{text}\n---\n\n"
             "输出 JSON：\n"
             '{"goals":[{"id":"n1","ch":"章节","title":"动词开头，一句话说清要掌握什么",'
@@ -557,10 +661,35 @@ def _norm_title(s: str) -> str:
     return re.sub(r"[\s，。：、；（）()【】\[\]·\-—_/,.]", "", str(s or "")).lower()
 
 
-def _clean_goals(items: list, seen_titles: list[str]) -> list[dict]:
-    """把模型给的目标收拾成内部结构：去重、夹估时、补验收点、记本地 id。"""
-    seen = {_norm_title(t) for t in seen_titles}
+def _title_grams(s: str) -> set[str]:
+    return {s[i:i + 2] for i in range(len(s) - 1)} or {s}
+
+
+def _title_similar(a: str, b: str) -> bool:
+    """标题近似：同一知识点被换了个更长的说法（「递归的写法与递归式」/ 后面再缀一章）。
+
+    用字符 bigram 的覆盖率，不用编辑距离：中文换个说法字面差很多，但二字组重合高。
+    阈值定得高（0.85）是有意的：「线性表顺序存储」和「线性表链式存储」只差一个词，
+    但它们是两个目标，不能合并。太短的标题（<5 字）只认完全相同。
+    """
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 5:
+        return False
+    ga, gb = _title_grams(a), _title_grams(b)
+    inter = len(ga & gb)
+    return inter / max(1, min(len(ga), len(gb))) >= 0.85
+
+
+def _clean_goals(items: list, seen_titles: list[str]) -> tuple[list[dict], list[str]]:
+    """把模型给的目标收拾成内部结构：去重、夹估时、补验收点、记本地 id。
+
+    返回 (目标列表, 被判定为重复而跳过的标题)。重复判断 = 归一化后完全相同，
+    或标题近似（换了个说法）。模型偶尔会无视提示重出一遍，这一层兜底。
+    """
+    seen = [_norm_title(t) for t in seen_titles if str(t).strip()]
     out: list[dict] = []
+    dups: list[str] = []
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict):
             continue
@@ -568,7 +697,8 @@ def _clean_goals(items: list, seen_titles: list[str]) -> list[dict]:
         if len(title) < 4:
             continue
         key = _norm_title(title)
-        if key in seen:
+        if any(_title_similar(key, s) for s in seen):
+            dups.append(title)
             continue
         try:
             m = int(it.get("est_minutes") or it.get("m") or 30)
@@ -583,8 +713,8 @@ def _clean_goals(items: list, seen_titles: list[str]) -> list[dict]:
                     "ch": str(it.get("ch") or "").strip()[:20], "title": title, "p": p,
                     "m": max(GOAL_MINUTES[0], min(GOAL_MINUTES[1], m)), "cp": cps,
                     "deps": [str(d) for d in (it.get("deps") or [])]})
-        seen.add(key)
-    return out
+        seen.append(key)
+    return out, dups
 
 
 def new_materials(db, course: str) -> list[dict]:
@@ -644,21 +774,25 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
         raise RuntimeError(f"新资料太多（{chars:,} 字 / {len(chunks)} 块），"
                            f"先分批放 inbox 再拆（一次最多 {DERIVE_MAX_CHUNKS} 块）")
 
-    existing = [g["title"] for g in db.goals(course=cid)]
+    known = db.goals(course=cid)
     subject = c.get("name") or db.get("subject") or cid
     exam = c.get("exam_date") or db.get("exam_date") or ""
     found: list[dict] = []
+    dups: list[str] = []
     for i, chunk in enumerate(chunks, 1):
         if progress:
             progress(f"拆目标 {i}/{len(chunks)}（{len(chunk):,} 字）…")
         msgs = [{"role": "system", "content": SYSTEM_SPLIT.format(max_goals=DERIVE_MAX_GOALS)},
-                {"role": "user", "content": _derive_user(subject, exam, existing, chunk)}]
+                {"role": "user", "content": _derive_user(subject, exam, known, chunk)}]
         text = llm.chat(msgs, db=db, max_tokens=2500, temperature=0.3, timeout=180)
         obj = llm.extract_json(text)
         items = obj.get("goals") if isinstance(obj, dict) else obj
         if not isinstance(items, list):
             raise llm.LLMError("拆目标没有返回 goals 数组")
-        found.extend(_clean_goals(items, existing + [g["title"] for g in found]))
+        cleaned, skipped = _clean_goals(items, [g["title"] for g in known])
+        found.extend(cleaned)
+        known.extend(cleaned)          # 后面几块也能看见这次新拆的
+        dups.extend(skipped)
 
     # 分配 id（接着现有 gNN 往后排），再把本地依赖映射过去
     used = {g["id"] for g in db.goals(course=cid)}
@@ -699,15 +833,37 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
     kb = write_knowledge(db, course=cid) if found else {"written": 0, "changed": 0}
     db.log(f"拆目标（{name}）：{chars:,} 字 → 新增 {len(found)} 个目标，"
            f"来自 {len(files)} 份资料", "ok")
+    if dups:
+        db.log(f"拆目标（{name}）：跳过 {len(dups)} 个疑似重复："
+               f"{'、'.join(dups[:8])}", "info")
     note = plan["note"] if found else f"{name}：模型认为新资料没有需要新增的目标"
+    if dups:
+        note += f"；跳过 {len(dups)} 个与已有目标重复的（换说法的也算）"
     return {"added": len(found), "titles": [g["title"] for g in found],
             "minutes": sum(g["m"] + 10 for g in found), "chars": chars,
             "files": files, "note": note, "uncovered": plan.get("uncovered", 0),
+            "duplicates": len(dups),
             "knowledge": kb.get("written", 0)}
 
 
 # ------------------------------------------------------------------ 一级：原始资料 → 文本 → 归档
 MANIFEST_VERSION = 1
+
+# 文件名里的版本尾巴：「第3章 v2」「第3章-最终」「第3章(1)」都算同一份资料的新版
+_VER_TAIL = re.compile(
+    r"(?i)(?:v\d+(?:\.\d+)*|final|最终版?|修改版?|修订版?|新版|旧版|副本|copy|\(\d+\)|（\d+）)$"
+)
+
+
+def _doc_key(name: str) -> str:
+    """资料名去掉版本后缀，用来判断「这是同一份资料的新版本」。"""
+    s = Path(str(name or "")).stem.strip().lower()
+    for _ in range(3):
+        nxt = _VER_TAIL.sub("", s).strip()
+        if nxt == s:
+            break
+        s = nxt
+    return re.sub(r"[\s_\-—·（）()\[\]【】]+", "", s)
 
 
 def _manifest_read() -> dict:
@@ -828,6 +984,10 @@ def process_inbox(db, course: str | None = None, progress=None, cancel=None,
     done_keys = {(i.get("sha1"), i.get("course")) for i in manifest["items"]
                  if i.get("status") == "done"}
     out_dir = paths.extracted_dir(cid) / "inbox"
+    # 文本文件名 → 它属于哪份原件（sha1）。同名不同内容不能互相覆盖：
+    # 比如两份都叫「第3章.pdf」，第二份会写成 第3章-<sha1前6位>.txt。
+    text_owner = {str(i.get("text") or ""): i.get("sha1")
+                  for i in manifest["items"] if i.get("text")}
     st = {"done": 0, "kept": 0, "failed": 0, "skipped": 0, "chars": 0,
           "moved": [], "hints": {}, "cancelled": False}
     total = len(files)
@@ -887,7 +1047,37 @@ def process_inbox(db, course: str | None = None, progress=None, cancel=None,
             return
         out_dir.mkdir(parents=True, exist_ok=True)
         dst = out_dir / (p.stem + ".txt")
+        owner = text_owner.get(str(dst))
+        if owner and owner != h:                  # 同名文件、内容不同 → 别覆盖
+            dst = out_dir / f"{p.stem}-{h[:6]}.txt"
+        text_owner[str(dst)] = h
         dst.write_text(text, encoding="utf-8")
+
+        # 同名旧版让位：旧文本改名 *.old.txt（不删，能翻回来），检索只读新版。
+        # 只在「同一份资料换了个版本」时做；换个名字的新资料不会被当成版本。
+        for old in manifest["items"]:
+            if old.get("course") != cid or old.get("sha1") == h:
+                continue
+            if old.get("status") != "done" or not old.get("text"):
+                continue
+            if old.get("superseded_by"):       # 已经让过位，别再叠一层
+                continue
+            if _doc_key(old.get("name") or "") != _doc_key(p.name):
+                continue
+            old_path = Path(str(old["text"]))
+            if old_path == dst or not old_path.is_file():
+                continue
+            old_new = old_path.with_name(old_path.stem + ".old.txt")
+            try:
+                if old_new.exists():
+                    old_new.unlink()
+                old_path.rename(old_new)
+            except OSError:
+                continue
+            old["text"] = str(old_new)
+            old["superseded_by"] = h
+            old["superseded_at"] = now().strftime("%Y-%m-%d %H:%M:%S")
+            db.log(f"旧版让位：{old.get('name')}（检索只用新版 {p.name}）", "info")
         try:
             db.add_material(paths.rel(p), h, len(text), "ready")   # 台账之外，库里也记一笔
         except Exception:  # noqa: BLE001

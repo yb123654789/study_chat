@@ -72,8 +72,10 @@ object ChatService {
         return conv
     }
 
+    /** 手机只留一个自由聊天窗：有就复用，没有才建。 */
     suspend fun freeConversation(ctx: Context): Conversation {
         val dao = AppDb.get(ctx).dao()
+        dao.latestFreeConv()?.let { return it }
         val conv = Conversation(
             id = newLocalId(),
             kind = "free",
@@ -118,8 +120,61 @@ object ChatService {
         return text
     }
 
-    private fun daysBetween(from: String, to: String): Int {
-        if (to.isBlank()) return 0
+    /** 自由聊天顶部的状态：全部课程合起来。 */
+    suspend fun stateBarAll(ctx: Context): String {
+        val dao = AppDb.get(ctx).dao()
+        val day = today()
+        val total = dao.countTasks(day)
+        val done = dao.countDone(day)
+        val minutes = dao.minutesDone(day)
+        val lag = dao.lagDays(day, "")
+        val bits = ArrayList<String>()
+        bits.add("今天 $done/$total 张")
+        bits.add("已学 $minutes 分钟")
+        if (lag > 0) bits.add("落后 $lag 天")
+        for (c in dao.courses().filter { it.archived == 0 }.take(3)) {
+            val left = daysBetween(day, c.examDate)
+            if (left >= 0) bits.add("${c.name.ifBlank { c.id }} 距考 $left 天")
+        }
+        return bits.joinToString("｜")
+    }
+
+    /** 今天 + 后面几天排好的卡，给自由聊天当"可推荐的范围"。 */
+    private suspend fun taskContext(ctx: Context): String {
+        val dao = AppDb.get(ctx).dao()
+        val day = today()
+        val rows = dao.upcoming(day)
+        if (rows.isEmpty()) return "（今天和以后都没有排卡：让用户去电脑端重排计划。）"
+        val sb = StringBuilder()
+        var groups = 0
+        for ((d, items) in rows.groupBy { it.date }) {
+            if (groups >= 3) break
+            sb.append(relDay(day, d)).append("（").append(items.size).append(" 张）：")
+            sb.append(
+                items.take(4).joinToString("；") {
+                    "${it.title}（${it.minutes} 分钟，${stateCn(it.state)}）"
+                }
+            )
+            sb.append('\n')
+            groups++
+        }
+        return sb.toString().trim()
+    }
+
+    private fun stateCn(state: String): String = when (state) {
+        "done" -> "已完成"
+        "skipped" -> "已跳过"
+        else -> "没做"
+    }
+
+    private fun relDay(today: String, d: String): String = when (val diff = daysBetween(today, d)) {
+        0 -> "今天"
+        1 -> "明天"
+        2 -> "后天"
+        else -> "再过 $diff 天"
+    }
+
+    private fun daysBetween(from: String, to: String): Int {        if (to.isBlank()) return 0
         val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
         return try {
             val a = fmt.parse(from)!!.time
@@ -207,6 +262,50 @@ $arbText
    问完继续答（先按资料讲，等用户裁定）。已经有裁定的概念不要问，直接按裁定讲。"""
     }
 
+    /** 自由聊天的 system prompt：没有目标/卡片，只给状态、任务和检索到的资料。 */
+    private fun freeSystemPrompt(state: String, tasks: String, hits: List<Retrieval.Hit>): String {
+        val src = if (hits.isEmpty()) {
+            "（这轮没检索到资料段落。只能讲通用知识，并且必须标注「补充说明」。）"
+        } else {
+            hits.joinToString("\n") {
+                "【资料】《${it.src}》${it.anchor}：${it.text.take(HIT_CHARS)}"
+            }
+        }
+        return """你是学习bot，用户在手机上的学习搭子。现在是自由聊天，没有绑定某一张卡。
+
+程序算好的状态（要引用就直接用，不要自己算、不要编）：
+$state
+
+程序排好的任务（推荐学习内容时只能从这里挑，不许自己编日期或改计划）：
+$tasks
+
+这轮检索到的资料段落（优先用；引用时写《资料名》+ 页码/幻灯片）：
+$src
+
+规则：
+1. 中文短句，先给结论再给理由；一次回答不超过 8 行。
+2. 只用上面的资料回答。资料里没有的，直说「资料里没有」，补充内容必须标「补充说明」。
+3. 不要输出任何日期、倒计时、进度数字（除了状态里已经有的）。
+4. 绝不说「你通过了 / 这张卡完成了」——是否通过只由小测判定。
+5. 用户问「学什么 / 先学哪张」：从上面的任务里挑一张，说明为什么先学它，再问他要不要开始；一次只推荐一张。
+6. 用户想被考：告诉他点输入框左边的「＋ → 考我」，从今天的卡里选一张；你不要自己出题。
+7. 用户想改计划：告诉他去电脑端改，手机端只读。
+8. 输出纯文本：不要用 Markdown（**加粗**、## 标题、`代码`），要强调就用「」。
+9. 每轮结尾用一个具体问题检查他是否真懂，别连着问两个以上。"""
+    }
+
+    /** 自由聊天只留一个工具：让程序报真实进度，省得模型自己算。 */
+    private fun toolsFree(): JSONArray = JSONArray().put(
+        JSONObject().put("type", "function").put(
+            "function", JSONObject().put("name", "show_plan")
+                .put("description", "用户问计划、进度、还剩多少、落后几天时调用，让程序把真实数字发给他。")
+                .put(
+                    "parameters", JSONObject().put("type", "object")
+                        .put("properties", JSONObject()).put("required", JSONArray())
+                )
+        )
+    )
+
     private val BOLD = Regex("\\*\\*(.+?)\\*\\*")
     private val HEAD = Regex("(?m)^#{1,4}\\s*")
 
@@ -287,24 +386,34 @@ $arbText
         val key = Secure.apiKey(ctx)
         if (key.isBlank()) throw ChatError("没配模型 key，去「设置」里填")
 
-        val hits = if (goal != null) Retrieval.search(ctx, goal, text, 3) else emptyList()
-        val cp = goal?.let { Retrieval.cpList(it) }.orEmpty()
+        // 自由聊天：不绑卡、不绑目标，检索走全部资料，上下文给今日任务
+        val free = task == null && goalId.isBlank()
+        val hits = when {
+            free -> Retrieval.searchFree(ctx, text, 3)
+            goal != null -> Retrieval.search(ctx, goal, text, 3)
+            else -> emptyList()
+        }
+        val cp = if (free) emptyList() else goal?.let { Retrieval.cpList(it) }.orEmpty()
         val gid = goalId.ifBlank { task?.goalId.orEmpty() }
-        val notes = if (gid.isBlank()) emptyList() else dao.notesForGoal(gid)
-        val arbs = if (gid.isBlank()) emptyList() else dao.arbitrationsFor(gid)
+        val notes = if (free || gid.isBlank()) emptyList() else dao.notesForGoal(gid)
+        val arbs = if (free || gid.isBlank()) emptyList() else dao.arbitrationsFor(gid)
         val courseName = task?.let { t -> dao.courses().firstOrNull { it.id == t.course }?.name }
             ?: goal?.let { g -> dao.courses().firstOrNull { it.id == g.course }?.name }
             ?: "当前课程"
-        val sys = systemPrompt(
-            courseName,
-            stateBar(ctx, task),
-            goal?.title ?: task?.title ?: "",
-            goal?.ch ?: "",
-            cp,
-            hits,
-            notes,
-            arbs,
-        )
+        val sys = if (free) {
+            freeSystemPrompt(stateBarAll(ctx), taskContext(ctx), hits)
+        } else {
+            systemPrompt(
+                courseName,
+                stateBar(ctx, task),
+                goal?.title ?: task?.title ?: "",
+                goal?.ch ?: "",
+                cp,
+                hits,
+                notes,
+                arbs,
+            )
+        }
 
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", sys))
         for (m in trim(dao.messages(convId, 50).reversed())) {
@@ -324,7 +433,7 @@ $arbText
             .put("text", text))
 
         val model = dao.meta("model")?.ifBlank { null } ?: "deepseek-flash"
-        var result = DeepSeek.stream(key, model, messages, toolsJson(), onDelta)
+        var result = DeepSeek.stream(key, model, messages, if (free) toolsFree() else toolsJson(), onDelta)
         var tokens = result.tokens
         var out = result.text
         var toolUsed = ""
@@ -344,7 +453,7 @@ $arbText
             messages.put(assistant)
             for (c in result.calls.take(2)) {
                 // 一轮最多问 1 次：第二个 ask_conflict 不再弹按钮
-                if (c.name == "ask_conflict" && conflict == null) {
+                if (!free && c.name == "ask_conflict" && conflict == null) {
                     conflict = conflictOf(ctx, gid, c.arguments)
                 }
                 val resText = runTool(ctx, convId, task, c.name, c.arguments, gid)
@@ -379,6 +488,18 @@ $arbText
         goalId: String = "",
     ): String {
         val dao = AppDb.get(ctx).dao()
+        val free = task == null && goalId.isBlank()
+        if (free) {
+            // 自由聊天不绑卡：出题/跳过要用户先选一张卡，别让模型瞎调
+            return when (name) {
+                "show_plan" -> "现在：${stateBarAll(ctx).replace("\n", "；")}"
+                "start_quiz" ->
+                    "手机端是自由聊天：点输入框左边「＋ → 考我」，从今天的卡里选一张再出题。"
+                "skip_task" ->
+                    "自由聊天不绑卡；要跳过某张卡，去电脑端，或先从「＋ → 考我」选一张。"
+                else -> "这个动作现在做不了"
+            }
+        }
         return when (name) {
             "start_quiz" -> "出题在右上「＋ → 考我」里打开小测页（3 题，答对 2 题才算完成），你只管继续讲。"
             "skip_task" -> {

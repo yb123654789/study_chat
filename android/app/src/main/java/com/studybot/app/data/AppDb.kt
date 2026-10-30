@@ -72,6 +72,13 @@ interface AppDao {
     @Query("SELECT * FROM conversations WHERE kind = 'task' AND taskId = :taskId LIMIT 1")
     suspend fun convForTask(taskId: Long): Conversation?
 
+    /** 手机只留一个自由聊天窗：永远复用同一条，不每次新建。 */
+    @Query("SELECT * FROM conversations WHERE kind = 'free' ORDER BY COALESCE(NULLIF(lastActive, ''), createdAt) DESC, id DESC LIMIT 1")
+    suspend fun latestFreeConv(): Conversation?
+
+    @Query("SELECT * FROM tasks WHERE date >= :from AND state != 'dropped' ORDER BY date, id LIMIT 30")
+    suspend fun upcoming(from: String): List<Task>
+
     @Query("SELECT * FROM conversations WHERE id = :id")
     suspend fun conv(id: Long): Conversation?
 

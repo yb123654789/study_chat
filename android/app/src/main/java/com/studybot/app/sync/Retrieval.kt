@@ -87,6 +87,50 @@ object Retrieval {
         return out
     }
 
+    /**
+     * 自由聊天用：没有「当前目标」，只按用户这句话去全部资料里找。
+     * 仍然只查 blocks（笔记不参与），取前 k 段，出处去重。
+     */
+    suspend fun searchFree(context: Context, query: String, k: Int = 3): List<Hit> {
+        BigramIndex.ensure(context)
+        val blocks: List<Block> = BigramIndex.all()
+        if (blocks.isEmpty()) return emptyList()
+        val n = blocks.size
+        val items = BigramIndex.terms(query).filter { t ->
+            BigramIndex.df(t).toDouble() / n < 0.25
+        }
+        if (items.isEmpty()) return emptyList()
+
+        val scored = ArrayList<Triple<Double, Block, List<String>>>()
+        for (b in blocks) {
+            var s = 0.0
+            val hit = ArrayList<String>()
+            for (t in items) {
+                val c = countOf(b.text, t)
+                if (c == 0) continue
+                val idf = ln((n + 1.0) / (BigramIndex.df(t) + 1.0)) + 0.5
+                s += minOf(c, 3) * idf * (if (t.length >= 3) 2 else 1)
+                hit.add(t)
+            }
+            if (s <= 0.0 || hit.isEmpty()) continue
+            scored.add(Triple(s, b, hit))
+        }
+        scored.sortByDescending { it.first }
+
+        val out = ArrayList<Hit>()
+        val seen = HashSet<String>()
+        for ((s, b, hit) in scored) {
+            if (!seen.add(b.src + "|" + b.anchor)) continue
+            val pos = hit.map { b.text.indexOf(it) }.filter { it >= 0 }.minOrNull() ?: 0
+            val start = maxOf(0, pos - 80)
+            val snippet = (if (start > 0) "…" else "") +
+                b.text.substring(start, minOf(b.text.length, start + 460))
+            out.add(Hit(b.src, b.anchor, snippet, s))
+            if (out.size == k) break
+        }
+        return out
+    }
+
     /** 标题词权重 2、验收点和章节词 1、人工检索词 3（照抄 build_reading.terms_of）。 */
     fun termsOf(goal: Goal): Map<String, Double> {
         val w = HashMap<String, Double>()

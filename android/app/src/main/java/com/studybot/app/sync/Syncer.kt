@@ -60,11 +60,15 @@ class Syncer(private val context: Context) {
         val newRev = json.optString("rev", prevRev ?: "0")
         val newBlocksRev = json.optString("blocks_rev", prevBlocksRev ?: "")
         val now = System.currentTimeMillis().toString()
+        // 手机上刚答完、还没上传的卡片状态：下行快照会把它盖回 todo，
+        // 这一轮先记下来，写完快照再盖回去，等 outbox 上传成功才以服务器为准。
+        val pendingStates = pendingTaskStates(dao)
 
         db.withTransaction {
             dao.clearCourses(); dao.putCourses(courses)
             dao.clearGoals(); dao.putGoals(goals)
             dao.clearTasks(); dao.putTasks(tasks)
+            for ((id, state) in pendingStates) dao.setTaskState(id, state)
             dao.clearQuizStats(); dao.putQuizStats(stats)
             dao.clearReviews(); dao.putReviews(reviews)
             // 会话/消息不清空：本地新聊的（id 为负）还要留着，P3 才上传
@@ -85,17 +89,33 @@ class Syncer(private val context: Context) {
                 .onFailure { Log.w("Syncer", "bigram 索引建失败：${it.message}") }
         }
 
-        // 落后就重排：只改本地，重排结果进 outbox 等电脑确认（P4）；
-        // 失败只记日志，不影响同步本身
-        runCatching { Replan.maybeReplan(context) }
-            .onSuccess { note -> if (!note.isNullOrBlank()) Log.i("Syncer", "自动重排：$note") }
-            .onFailure { Log.w("Syncer", "自动重排失败：${it.message}") }
+        // 手机端已改成只读 + 自由聊天：重排交给服务器（每日 auto_replan），
+        // 本地不再插卡（本地插的卡下次同步会被快照覆盖，反而误导）。
 
         // 上行：把 outbox 里的短期数据推给电脑（P3）；失败不影响下行同步
         runCatching { uploadOutbox(dao, base, token) }
             .onFailure { Log.w("Syncer", "上行失败，留着下次重传：${it.message}") }
 
         Result(newRev, goals.size, tasks.size, blocks?.size ?: 0, newBlocksRev)
+    }
+
+    /** outbox 里还没上传的卡片状态：同一张卡取最后一条。 */
+    private suspend fun pendingTaskStates(
+        dao: com.studybot.app.data.AppDao,
+    ): Map<Long, String> {
+        val out = HashMap<Long, String>()
+        for (e in dao.pendingOutbox()) {
+            if (e.kind != "task_state") continue
+            try {
+                val o = JSONObject(e.payload)
+                val id = o.optLong("task_id", 0L)
+                val state = o.optString("state")
+                if (id > 0L && state.isNotBlank()) out[id] = state
+            } catch (_: Exception) {
+                // payload 坏了就跳过，别影响整轮同步
+            }
+        }
+        return out
     }
 
     private suspend fun uploadOutbox(dao: com.studybot.app.data.AppDao, base: String, token: String) {

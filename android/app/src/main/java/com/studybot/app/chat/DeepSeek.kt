@@ -77,7 +77,10 @@ object DeepSeek {
                 obj.optJSONObject("usage")?.let { tokens = it.optInt("total_tokens", tokens) }
                 val choice = obj.optJSONArray("choices")?.optJSONObject(0) ?: continue
                 val delta = choice.optJSONObject("delta") ?: continue
-                val content = delta.optString("content", "")
+                // 注意：Android 的 org.json 对 JSON null 调 optString 会得到字符串 "null"。
+                // 首块（只有 role）和带 tool_calls 的块 content 都是 null，
+                // 不判空就会把一串 "null" 直接拼进回复里。
+                val content = textOf(delta, "content")
                 if (content.isNotEmpty()) {
                     text.append(content)
                     onDelta(content)
@@ -87,11 +90,11 @@ object DeepSeek {
                     val tc = tcs.optJSONObject(i) ?: continue
                     val idx = tc.optInt("index", 0)
                     val slot = calls.getOrPut(idx) { mutableMapOf("id" to "", "name" to "", "args" to "") }
-                    if (tc.has("id")) slot["id"] = tc.optString("id")
+                    if (tc.has("id")) slot["id"] = textOf(tc, "id")
                     val fn = tc.optJSONObject("function")
                     if (fn != null) {
-                        if (fn.has("name")) slot["name"] = fn.optString("name")
-                        slot["args"] = (slot["args"] ?: "") + fn.optString("arguments", "")
+                        if (fn.has("name")) slot["name"] = textOf(fn, "name")
+                        slot["args"] = (slot["args"] ?: "") + textOf(fn, "arguments")
                     }
                 }
             }
@@ -105,6 +108,10 @@ object DeepSeek {
             }
         StreamResult(text.toString(), outCalls, tokens)
     }
+
+    /** 取字符串字段；JSON null 当空串（见上面 stream 里的注释）。 */
+    private fun textOf(o: JSONObject, key: String): String =
+        if (o.isNull(key)) "" else o.optString(key, "")
 
     /** 非流式一次要完整回答：出题、判分用（不用 SSE，省得拼 delta）。 */
     suspend fun complete(

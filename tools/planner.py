@@ -80,11 +80,13 @@ def task_minutes(g: dict) -> int:
 def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
              weekday_weight: float = 1.0, weekend_weight: float = WEEKEND_WEIGHT,
              buffer_rate: float = BUFFER_RATE, lost_days: int = 0,
-             day_cap: int = 0) -> dict:
+             day_cap: int = 0, daily_budget: int = 0) -> dict:
     """排到 deadline。
 
     weekday_weight / weekend_weight：周末相对工作日多学多少（权重，不是分钟）。
     day_cap：每天最多多少分钟，0 = 不限（唯一写死的「上限」由人决定，不由代码编）。
+    daily_budget：跨课程分给这门课的日均分钟（0 = 不设）。到了就把当天目标压到
+    这个数（周末按同一比例放大）；单张卡不能拆，所以某天可能多出一张卡的量。
     """
     goals = topo(goals)
     ordinary = [g for g in goals if g["ch"] != "应试"]
@@ -102,6 +104,14 @@ def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
 
     def w(day: dt.date) -> float:
         return day_weight(day, weekday_weight, weekend_weight)
+
+    mean_w = (weekday_weight * 5 + weekend_weight * 2) / 7 or 1.0
+
+    def budget_target(day: dt.date, target: float) -> float:
+        """跨课程总预算分到这门课的上限；没设就原样返回。"""
+        if daily_budget <= 0:
+            return target
+        return min(target, daily_budget * w(day) / mean_w)
 
     card_max = max((task_minutes(g) for g in ordinary), default=0)
 
@@ -135,6 +145,7 @@ def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
         left_weight = sum(w(d) for d in left_days) or 1.0
         target = max(unit * w(day),
                      sum(task_minutes(g) for g in queue) / left_weight * w(day))
+        target = budget_target(day, target)
         cap = cap_of(day, target)
         cap_total += cap
         if i % 4 == 0:                                # 每 4 天一个纯复习日
@@ -153,6 +164,9 @@ def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
         while queue and (used < target or not tasks):
             g = queue[0]
             need = task_minutes(g)
+            # 预算模式：别为了「凑满今天」再多塞一张，宁可少学一点
+            if daily_budget > 0 and tasks and used + need > target:
+                break
             # 卡是按目标整体切的，不能拆：没设每日上限时，单张比当天配额大也得排得下，
             # 否则卡一大就整天卡死、最后剩一堆目标排不进去（重排会一直「排不下」）。
             if used + need > cap and (tasks or day_cap):
@@ -177,12 +191,12 @@ def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
     core_ids = [g for g in ordinary if g["p"] == "core"]
     rot = 0
     # 冲刺日也按剩余量摊：模考的量 ÷ 剩余天数 + 课后复习的位置
-    mean_w = (weekday_weight * 5 + weekend_weight * 2) / 7 or 1.0
     b_room = sum(task_minutes(g) for g in exam) / max(1, len(phase_b)) + 45
     exam_max = max((task_minutes(g) for g in exam), default=0)
     for day in phase_b:
         # 冲刺日也要放得下一整张模考卡（卡不能拆）
-        cap = int(b_room * (w(day) / mean_w) / (1 - buffer_rate)) + exam_max
+        b_target = budget_target(day, b_room * (w(day) / mean_w))
+        cap = int(b_target / (1 - buffer_rate)) + exam_max
         if day_cap:
             cap = min(cap, int(day_cap))
         floor = min(MIN_DAY_CAP, int(day_cap)) if day_cap else MIN_DAY_CAP
@@ -191,6 +205,8 @@ def schedule(goals: list[dict], start: dt.date, deadline: dt.date,
         tasks, used = [], 0
         while exam:                                   # 也按分钟，不按张数
             need = task_minutes(exam[0])
+            if daily_budget > 0 and tasks and used + need > b_target:
+                break
             if used + need > cap and (tasks or day_cap):
                 break
             g = exam.pop(0)

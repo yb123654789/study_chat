@@ -118,6 +118,20 @@ def main() -> int:
         print("  ✗ 无 key 提示")
         traceback.print_exc()
 
+    # 设置页：手机连接（地址/token）+ 每天总预算控件在
+    try:
+        app.show("settings")
+        app.update()
+        page = app._pages["settings"]
+        assert page.conn_url.cget("text"), "手机连接地址为空"
+        assert page.conn_token.cget("text"), "手机连接 token 为空"
+        assert page.f_total.get() != "", "每天总预算输入框为空"
+        print("  ✓ 设置页：手机连接 / 每天总预算")
+    except Exception:  # noqa: BLE001
+        bad += 1
+        print("  ✗ 设置页：手机连接 / 每天总预算")
+        traceback.print_exc()
+
     # 课程下拉：至少数据结构这门；有第二门就切一下
     try:
         app.load_courses()

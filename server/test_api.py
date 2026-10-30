@@ -299,6 +299,22 @@ def main() -> int:
               r_msg["accepted"] == 1 and len(conv_msg) == before_msgs + 1
               and conv_msg[-1]["text"] == "手机上的一句", str(r_msg))
 
+        # 自由聊天：没有 task_id 的消息全部并到同一条 free 会话（不再每条新建）
+        before_free = int((d.q1("SELECT COUNT(*) AS n FROM conversations WHERE kind='free'")
+                           or {}).get("n") or 0)
+        db.mobile_events([{"uid": "ev-free-1", "kind": "message", "task_id": None,
+                           "text": "今天学什么"}], device="test-phone")
+        db.mobile_events([{"uid": "ev-free-2", "kind": "message",
+                           "text": "先学排序"}], device="test-phone")
+        after_free = int((d.q1("SELECT COUNT(*) AS n FROM conversations WHERE kind='free'")
+                          or {}).get("n") or 0)
+        free = d.q1("SELECT * FROM conversations WHERE kind='free' ORDER BY id LIMIT 1")
+        free_msgs = d.conv_messages(int(free["id"]), 50) if free else []
+        check("自由消息不再每条新建会话",
+              after_free == max(1, before_free)
+              and any(m["text"] == "先学排序" for m in free_msgs),
+              f"{before_free} -> {after_free} / {len(free_msgs)} 条")
+
         # 手机内冲突裁定（P7）：服务器没有 arbitrations 表，落 settings 的 arb:<uid>
         arb_ev = {"uid": "ev-arb-1", "kind": "arbitration", "course": "ds", "goal_id": gid,
                   "concept": "二叉树中序遍历的顺序",

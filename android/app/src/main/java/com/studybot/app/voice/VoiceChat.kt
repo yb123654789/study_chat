@@ -52,6 +52,9 @@ class VoiceChat(
 
         /** 给用户看的提示（Toast 文案），页面可以转成 Toast / 状态行。 */
         fun onNotice(text: String) {}
+
+        /** 系统识别彻底用不了（没服务 / 服务没录音权限）：页面可以提议改用系统语音输入。 */
+        fun onUnavailable(reason: String) {}
     }
 
     enum class Mode { CONTINUOUS, MANUAL }
@@ -134,7 +137,8 @@ class VoiceChat(
     init {
         startTts()
         if (!SpeechRecognizer.isRecognitionAvailable(app)) {
-            switchToManual("这台手机没装语音识别，已改成手动")
+            cb.onUnavailable("这台手机没有可用的系统语音识别服务")
+            switchToManual("这台手机没装语音识别，已改成手动", notify = false)
         }
     }
 
@@ -278,12 +282,14 @@ class VoiceChat(
         if (_state.value == State.THINKING) return
         if (tts?.isSpeaking == true) stopSpeaking()
         if (!SpeechRecognizer.isRecognitionAvailable(app)) {
+            cb.onUnavailable("这台手机没有可用的系统语音识别服务")
             switchToManual("这台手机没装语音识别，已改成手动")
             return
         }
         val r = ensureRecognizer()
         if (r == null) {
             _state.value = State.IDLE
+            cb.onUnavailable("语音识别器起不来")
             cb.onNotice("语音识别起不来，改用打字吧")
             return
         }
@@ -436,6 +442,9 @@ class VoiceChat(
             if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                 rebuildRecognizer()
             }
+            if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                cb.onUnavailable(errorText(error))
+            }
             cb.onNotice(errorText(error))
             return
         }
@@ -457,7 +466,8 @@ class VoiceChat(
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
                 handsFree = false
                 _state.value = State.IDLE
-                cb.onNotice("没给麦克风权限，改用打字吧")
+                cb.onUnavailable(errorText(error))
+                cb.onNotice("系统识别服务拿不到录音权限，改用系统语音输入或打字")
             }
             SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
             SpeechRecognizer.ERROR_SERVER -> {
@@ -482,14 +492,14 @@ class VoiceChat(
         schedule(delay) { startListening() }
     }
 
-    private fun switchToManual(reason: String) {
+    private fun switchToManual(reason: String, notify: Boolean = true) {
         handsFree = false
         mode = Mode.MANUAL
         _state.value = State.IDLE
         cancelPending()
         abortListening()
         cb.onModeChanged(Mode.MANUAL, reason)
-        if (!autoManualNotified) {
+        if (notify && !autoManualNotified) {
             autoManualNotified = true
             Toast.makeText(app, reason, Toast.LENGTH_LONG).show()
         }
@@ -589,7 +599,7 @@ class VoiceChat(
     private fun errorText(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_AUDIO -> "录音出错"
         SpeechRecognizer.ERROR_CLIENT -> "识别器被中断"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没给麦克风权限"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "系统语音识别服务没有录音权限（不是本 App 的开关）"
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
             "网络没连上（语音识别要联网）"
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听清"

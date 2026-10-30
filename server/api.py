@@ -265,8 +265,13 @@ def _apply_event(db, ev) -> dict:
     if kind == "message":
         tid = ev.get("task_id")
         t = db.task(int(tid)) if tid else None
-        conv = chat.conversation(db, t) if t else db.conversation(None, kind="free",
-                                                                  title="自由问答")
+        if t:
+            conv = chat.conversation(db, t)
+        else:
+            # 手机只剩一个自由聊天窗：全部并到同一条会话，别每条消息新建一条
+            conv = db.q1("SELECT * FROM conversations WHERE kind='free' ORDER BY id LIMIT 1")
+            if not conv:
+                conv = db.conversation(None, kind="free", title="自由问答")
         db.add_message(int(conv["id"]), "me", str(ev.get("text") or ""))
         return {"ok": True, "conv_id": conv["id"]}
 
