@@ -8,6 +8,8 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -103,21 +105,6 @@ class ChatActivity : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(false)
         binding.toolbar.title = "学习bot"
 
-        binding.toolbar.inflateMenu(R.menu.menu_main)
-        binding.toolbar.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                R.id.action_sync -> {
-                    syncNow(silent = false)
-                    true
-                }
-                R.id.action_settings -> {
-                    startActivity(Intent(this, SettingsActivity::class.java))
-                    true
-                }
-                else -> false
-            }
-        }
-
         binding.sendButton.setOnClickListener { send(null) }
         binding.moreButton.setOnClickListener { showMenu() }
         initVoice()
@@ -136,6 +123,20 @@ class ChatActivity : AppCompatActivity() {
             refreshBar()
             syncNow(silent = true)
         }
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_main, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.action_sync -> syncNow(silent = false)
+            R.id.action_settings -> startActivity(Intent(this, SettingsActivity::class.java))
+            else -> return super.onOptionsItemSelected(item)
+        }
+        return true
     }
 
     override fun onResume() {

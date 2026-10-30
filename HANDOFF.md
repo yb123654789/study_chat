@@ -15,12 +15,13 @@
 
 **用户拍板**：手机只要聊天；一学期不止一门课；资料会分几批入库；语音在真机上要能用。
 
-### 手机端（v0.2.0，APK 已出，**没真机验**）
+### 手机端（v0.2.0，APK 已出；MuMu 模拟器验过启动/菜单，**真机没验**）
 
 - 启动页改成 `ChatActivity`（launcher），不再先进「今日」点卡片；旧 6 tab 主页代码还在，但没入口。
 - 只留一个自由会话：`ChatService.freeConversation` 复用最近一条 `kind='free'`，不再每次新建。
 - 自由聊天上下文：`stateBarAll`（全部课程合起来）+ 今天/明天/后天排好的卡 + 全库检索 `Retrieval.searchFree`；工具只留 `show_plan`。
-- 「＋」：考我（先选今天一张卡）/ 看计划 / 语音自检 / 清空；右上：同步 / 设置。
+- 「＋」：考我（先选今天一张卡）/ 系统语音输入 / 看计划 / 语音自检 / 清空；右上：同步 / 设置。
+- **右上「同步 / 设置」原来不显示**：`toolbar.inflateMenu` 和 `setSupportActionBar` 一起用时菜单没挂上去；改成 `onCreateOptionsMenu` / `onOptionsItemSelected`，模拟器截图确认可见。
 - **首句一堆 null 的根因**：Android `org.json` 对 `content:null` 调 `optString` 返回字符串 `"null"`；SSE 首块（只有 role）和 tool_calls 块都带 null。`DeepSeek.stream` 改 `textOf()` 判 `isNull`；旧消息里只有 null 的渲染时跳过。
 - **语音**：原先 `ERROR_INSUFFICIENT_PERMISSIONS` 一律提示「没给麦克风权限」，但真正录音的是系统识别服务，本 App 开了也没用。现在：提示改成「系统语音识别服务没有录音权限（不是本 App 的开关）」+ 「＋ → 语音自检」（本 App 权限 / 识别服务 / TTS / 系统语音面板 / 机型）+ 系统语音输入回退（`RecognizerIntent` 弹系统面板，走输入法/语音助手）。「＋」里另有「系统语音输入」，不用等报错，直接走系统面板。
 - 手机不再本地重排（`Syncer` 去掉 `Replan.maybeReplan`）：重排只在服务器做，避免本地插卡被快照覆盖。
@@ -48,7 +49,7 @@
 ### 验证 / 没验证
 
 - `tools/test_planner.py`、`tools/test_budget.py`、`app/selftest.py`（129）、`server/test_api.py`（55）、`app/uismoke.py`（15）全过；预算分配和资料版本用临时库各跑了一次集成。
-- APK 只编译通过 + `aapt2` 确认 launcher 是 `ChatActivity`、versionName 0.2.0；**没真机跑**。
+- APK 只编译通过 + `aapt2` 确认 launcher 是 `ChatActivity`、versionName 0.2.0；**MuMu 模拟器（Android 15 / 小米 12 机型）装过并启动：直接进聊天、没有 6 个 tab、右上「同步/设置」可见、首屏提示正常；真机没验**。
 - 语音权限那条要用户装 0.2.0 后开「＋ → 语音自检」，把内容发回来再定下一步（系统识别 / 系统面板 / 云端 ASR）。
 
 ---
