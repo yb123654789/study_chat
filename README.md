@@ -12,8 +12,8 @@
 
 最新安装包在 [Releases](https://github.com/yb123654789/study_chat/releases)：
 
-- `StudyBot-desktop-win64.zip`：解压后双击 `学习bot-app\学习bot.exe`，第一次选数据目录
-- `StudyBot-android-x.y.z.apk`：Android 7+，安装时允许未知来源（v0.3.0 约 323 MB，内置离线语音模型）
+- `StudyBot-desktop-win64-v0.3.0.zip`：解压后双击 `学习bot-app\学习bot.exe`，第一次选数据目录
+- `StudyBot-android-v0.3.0.apk`：Android 7+，安装时允许未知来源（约 323 MB，内置离线语音模型）
 
 文档：[项目介绍](项目介绍.md)（功能、架构、怎么跑） · [开发计划](开发计划.md)（进度、待办、坑）
 
