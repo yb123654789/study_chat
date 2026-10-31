@@ -5,13 +5,14 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.EditText
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
@@ -21,7 +22,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.button.MaterialButton
 import com.studybot.app.chat.ChatService
 import com.studybot.app.data.AppDb
 import com.studybot.app.data.Conversation
@@ -29,8 +29,9 @@ import com.studybot.app.databinding.ActivityChatBinding
 import com.studybot.app.sync.Syncer
 import com.studybot.app.ui.color
 import com.studybot.app.ui.dp
-import com.studybot.app.voice.VoiceChat
+import com.studybot.app.voice.VoiceCore
 import com.studybot.app.voice.VoiceSelfCheck
+import com.studybot.app.voice.VoiceService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,8 +40,10 @@ import org.json.JSONArray
 /**
  * 手机端唯一入口：一个自由聊天窗口。
  *
- * 不绑卡、不列计划：上下文里带上程序排好的今日任务和全部资料检索，
- * 让用户和 AI 商量学什么；要出题从「＋ → 考我」里选今天的卡。
+ * 语音走 [VoiceCore]（本地 SenseVoice + Silero VAD，麦克风常开），
+ * 不再依赖系统语音识别服务——小米/HyperOS 上那个服务被第三方调用时会拒录音。
+ *
+ * 页面只负责两件事：把识别出的话发出去、把流式回复按句喂给 [VoiceCore] 去念。
  */
 class ChatActivity : AppCompatActivity() {
 
@@ -48,13 +51,15 @@ class ChatActivity : AppCompatActivity() {
     private var conv: Conversation? = null
     private var convId: Long = 0L
 
-    private var voice: VoiceChat? = null
-    private var ttsOn = true
     private var syncing = false
     private var fallbackShown = false
     private var micTouched = false
 
+    /** 流式回复里还没成句的文字（凑够一句就交给 TTS）。 */
+    private val ttsBuf = StringBuilder()
+
     private val LEGACY_NULL = Regex("(?i)^(?:null\\s*)+$")
+    private val DONE_CHARS = charArrayOf('。', '！', '？', '；', '.', '!', '?', ';', '\n')
 
     companion object {
         const val EXTRA_CONV = "conv_id"
@@ -64,7 +69,26 @@ class ChatActivity : AppCompatActivity() {
         const val EXTRA_TITLE = "title"
     }
 
-    /** 麦克风权限：拒绝就指路去系统设置；给了一样的按刚才那一下开听。 */
+    private val voiceUi = object : VoiceCore.Listener {
+        override fun onState(state: VoiceCore.State) {
+            renderVoice(state)
+        }
+
+        override fun onUtterance(text: String) {
+            onHeard(text)
+        }
+
+        override fun onNotice(text: String) {
+            toast(text)
+            if (text.contains("起不来")) offerSystemVoice(text)
+        }
+
+        override fun onProgress(pct: Int) {
+            renderVoice(VoiceCore.State.PREPARING, "正在准备语音模型 $pct%")
+        }
+    }
+
+    /** 麦克风权限：拒绝就指路去系统设置；给了一样接着开语音。 */
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) {
@@ -72,10 +96,14 @@ class ChatActivity : AppCompatActivity() {
                 return@registerForActivityResult
             }
             micTouched = true
-            voice?.onMicTap()
+            toggleVoice()
         }
 
-    /** 系统语音输入面板（输入法 / 语音助手）：内置识别用不了时的退路。 */
+    /** Android 13+ 前台服务要通知权限；不给也照样能跑，只是通知看不见。 */
+    private val notifPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    /** 系统语音输入面板（输入法 / 语音助手）：本地识别出问题时的退路。 */
     private val systemVoice =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
             if (res.resultCode != RESULT_OK) return@registerForActivityResult
@@ -88,13 +116,8 @@ class ChatActivity : AppCompatActivity() {
                 toast("没听清，再说一次或打字")
                 return@registerForActivityResult
             }
-            if (voice?.mode == VoiceChat.Mode.CONTINUOUS) {
-                binding.input.setText("")
-                send(text)
-            } else {
-                binding.input.setText(text)
-                binding.input.setSelection(binding.input.text?.length ?: 0)
-            }
+            binding.input.setText(text)
+            binding.input.setSelection(binding.input.text?.length ?: 0)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -105,9 +128,9 @@ class ChatActivity : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(false)
         binding.toolbar.title = "学习bot"
 
-        binding.sendButton.setOnClickListener { send(null) }
+        binding.sendButton.setOnClickListener { send() }
         binding.moreButton.setOnClickListener { showMenu() }
-        initVoice()
+        initVoiceUi()
 
         convId = intent.getLongExtra(EXTRA_CONV, 0L)
         lifecycleScope.launch {
@@ -139,22 +162,21 @@ class ChatActivity : AppCompatActivity() {
         return true
     }
 
-    override fun onResume() {
-        super.onResume()
-        voice?.resume()
-        if (!this::binding.isInitialized || conv == null) return
-        refreshBar()
+    override fun onStart() {
+        super.onStart()
+        VoiceCore.addListener(voiceUi)
+        renderVoice(VoiceCore.state.value)
+        if (VoiceCore.isOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    override fun onPause() {
-        super.onPause()
-        voice?.pause()
+    override fun onStop() {
+        super.onStop()
+        VoiceCore.removeListener(voiceUi)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        voice?.shutdown()
-        voice = null
+        VoiceCore.removeListener(voiceUi)
     }
 
     // ---------------------------------------------------------------- 同步 / 状态
@@ -214,95 +236,83 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------- 语音
-    private fun initVoice() {
+    private fun initVoiceUi() {
         val prefs = getSharedPreferences("voice", MODE_PRIVATE)
-        ttsOn = prefs.getBoolean("tts", true)
-        val startMode = if (prefs.getString("mode", "continuous") == "manual") {
-            VoiceChat.Mode.MANUAL
-        } else {
-            VoiceChat.Mode.CONTINUOUS
-        }
-
-        val v = VoiceChat(
-            this,
-            object : VoiceChat.Callbacks {
-                override fun onPartial(text: String) {
-                    if (text.isBlank()) return
-                    binding.input.setText(text)
-                    binding.input.setSelection(binding.input.text?.length ?: 0)
-                }
-
-                override fun onFinal(text: String) {
-                    if (text.isBlank()) return
-                    if (voice?.mode == VoiceChat.Mode.CONTINUOUS) {
-                        binding.input.setText("")
-                        send(text)
-                    } else {
-                        binding.input.setText(text)
-                        binding.input.setSelection(binding.input.text?.length ?: 0)
-                    }
-                }
-
-                override fun onModeChanged(mode: VoiceChat.Mode, reason: String) {
-                    binding.modeButton.text = modeLabel(mode)
-                    prefs.edit()
-                        .putString(
-                            "mode",
-                            if (mode == VoiceChat.Mode.CONTINUOUS) "continuous" else "manual"
-                        )
-                        .apply()
-                }
-
-                override fun onNotice(text: String) {
-                    toast(text)
-                }
-
-                override fun onUnavailable(reason: String) {
-                    offerSystemVoice(reason)
-                }
-            },
-            startMode,
-            ttsOn,
-        )
-        voice = v
-
-        binding.modeButton.text = modeLabel(v.mode)
-        binding.ttsButton.text = ttsLabel(ttsOn)
+        binding.ttsButton.text = if (prefs.getBoolean("tts", true)) "朗读开" else "朗读关"
         binding.micButton.setOnClickListener { onMicClick() }
-        binding.modeButton.setOnClickListener {
-            val vv = voice ?: return@setOnClickListener
-            vv.setMode(
-                if (vv.mode == VoiceChat.Mode.CONTINUOUS) VoiceChat.Mode.MANUAL
-                else VoiceChat.Mode.CONTINUOUS
-            )
-        }
         binding.ttsButton.setOnClickListener {
-            ttsOn = !ttsOn
-            voice?.setTtsEnabled(ttsOn)
-            binding.ttsButton.text = ttsLabel(ttsOn)
-            prefs.edit().putBoolean("tts", ttsOn).apply()
-            toast(if (ttsOn) "会朗读回复" else "不朗读，只看文字")
+            val on = !prefs.getBoolean("tts", true)
+            prefs.edit().putBoolean("tts", on).apply()
+            VoiceCore.setTtsEnabled(on)
+            binding.ttsButton.text = if (on) "朗读开" else "朗读关"
+            toast(if (on) "会朗读回复" else "不朗读，只看文字")
         }
-
-        lifecycleScope.launch {
-            v.state.collect { renderVoiceState(it) }
+        binding.modeButton.setOnClickListener {
+            val on = binding.modeButton.text == "插嘴关"
+            VoiceCore.setBargeInEnabled(on)
+            binding.modeButton.text = if (on) "插嘴开" else "插嘴关"
         }
-        renderVoiceState(v.state.value)
+        VoiceCore.setTtsEnabled(prefs.getBoolean("tts", true))
+        renderVoice(VoiceCore.state.value)
     }
 
+    /** 麦克风按钮：没开就开；正在说话就打断；其它情况就是关掉整个语音。 */
     private fun onMicClick() {
+        when (VoiceCore.state.value) {
+            VoiceCore.State.SPEAKING -> VoiceCore.interruptSpeaking()
+            else -> toggleVoice()
+        }
+    }
+
+    private fun toggleVoice() {
+        if (VoiceCore.isOn) {
+            VoiceCore.stop()
+            VoiceService.stop(this)
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            renderVoice(VoiceCore.State.OFF)
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        if (conv == null) {
-            toast("会话还没准备好，等一下再点")
-            return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         micTouched = true
-        voice?.onMicTap()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        VoiceService.start(this)
+        VoiceCore.start(this)
+        renderVoice(VoiceCore.state.value)
+    }
+
+    private fun onHeard(text: String) {
+        if (text.isBlank() || conv == null) return
+        addBubble("me", text)
+        sendToModel(text)
+    }
+
+    private fun renderVoice(state: VoiceCore.State, extra: String = "") {
+        binding.micButton.text = when (state) {
+            VoiceCore.State.OFF -> "开始"
+            VoiceCore.State.SPEAKING -> "打断"
+            else -> "停止"
+        }
+        binding.modeButton.isEnabled = VoiceCore.bargeInAvailable
+        binding.voiceState.text = when (state) {
+            VoiceCore.State.OFF -> "语音关着：点「开始」，之后一直说就行（说完停一下就发）"
+            VoiceCore.State.PREPARING -> extra.ifBlank { "正在准备语音模型…" }
+            VoiceCore.State.LISTENING -> "正在听…"
+            VoiceCore.State.THINKING -> "在想…"
+            VoiceCore.State.SPEAKING ->
+                if (VoiceCore.bargeInAvailable) "正在说…你直接插嘴就能打断"
+                else "正在说…点「打断」"
+        }
     }
 
     /** 系统设置里给学习bot开了麦克风，这里仍可能没生效：直接指路。 */
@@ -311,7 +321,7 @@ class ChatActivity : AppCompatActivity() {
             .setTitle("麦克风没开")
             .setMessage(
                 "本 App 没拿到录音权限。\n\n" +
-                    "去「设置 → 应用 → 学习bot → 权限 → 麦克风」选「使用应用时允许」，回来再点语音。\n\n" +
+                    "去「设置 → 应用 → 学习bot → 权限 → 麦克风」选「使用应用时允许」，回来再点「开始」。\n\n" +
                     "也可以先用打字。"
             )
             .setPositiveButton("去设置") { _, _ -> VoiceSelfCheck.openAppSettings(this) }
@@ -319,16 +329,15 @@ class ChatActivity : AppCompatActivity() {
             .show()
     }
 
-    /** 内置识别彻底用不了：给一个「系统语音输入」的退路，别让人以为只能打字。 */
+    /** 本地识别不可用时的退路：弹系统语音面板（走输入法/语音助手）。 */
     private fun offerSystemVoice(reason: String) {
         if (fallbackShown || isFinishing || !micTouched) return
         fallbackShown = true
         AlertDialog.Builder(this)
-            .setTitle("系统语音识别用不了")
+            .setTitle("本地语音起不来")
             .setMessage(
                 "$reason\n\n" +
-                    "可以改用手机自己的语音输入（会弹系统录音面板，走输入法或语音助手），" +
-                    "或者直接打字。"
+                    "可以先改用手机自己的语音输入（弹系统面板，走输入法或语音助手），或者直接打字。"
             )
             .setPositiveButton("用系统语音输入") { _, _ -> launchSystemVoice() }
             .setNegativeButton("打字", null)
@@ -347,25 +356,6 @@ class ChatActivity : AppCompatActivity() {
         } catch (_: ActivityNotFoundException) {
             toast("这台手机没有系统语音输入，只能打字")
         }
-    }
-
-    private fun renderVoiceState(state: VoiceChat.State) {
-        binding.voiceState.text = when (state) {
-            VoiceChat.State.LISTENING -> "正在听…"
-            VoiceChat.State.THINKING -> "在想…"
-            VoiceChat.State.SPEAKING -> "正在说…"
-            VoiceChat.State.IDLE -> "空闲"
-        }
-        binding.micButton.text = if (state == VoiceChat.State.LISTENING) "停止" else "语音"
-    }
-
-    private fun modeLabel(mode: VoiceChat.Mode): String =
-        if (mode == VoiceChat.Mode.CONTINUOUS) "免手" else "手动"
-
-    private fun ttsLabel(on: Boolean): String = if (on) "朗读开" else "朗读关"
-
-    private fun toast(text: String) {
-        Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
     }
 
     // ---------------------------------------------------------------- 渲染
@@ -454,22 +444,33 @@ class ChatActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------- 发送
-    private fun send(preset: String?) {
-        val input: EditText = binding.input
-        val msg = (preset ?: input.text?.toString().orEmpty()).trim()
+    private fun send() {
+        val msg = binding.input.text?.toString().orEmpty().trim()
         if (msg.isEmpty() || conv == null) {
-            voice?.onTurnFailed()
+            VoiceCore.onTurnFailed()
             return
         }
-        input.setText("")
+        binding.input.setText("")
         addBubble("me", msg)
+        sendToModel(msg)
+    }
+
+    /**
+     * 发一句话给模型，边流式回边念：凑够一句就交给 [VoiceCore.speakChunk]，
+     * 这样第一句能先响，不用等整段。
+     */
+    private fun sendToModel(msg: String) {
+        if (conv == null) {
+            toast("会话还没准备好，等一下再发")
+            VoiceCore.onTurnFailed()
+            return
+        }
         binding.sendButton.isEnabled = false
-        voice?.onThinking()
+        ttsBuf.setLength(0)
         var streamView: TextView? = null
 
         lifecycleScope.launch {
             try {
-                // 自由聊天：不带 task / goal
                 val reply = ChatService.reply(this@ChatActivity, convId, null, "", msg) { chunk ->
                     runOnUiThread {
                         if (streamView == null) {
@@ -478,14 +479,20 @@ class ChatActivity : AppCompatActivity() {
                             streamView?.append(chunk)
                             scrollDown()
                         }
+                        feedTts(chunk)
                     }
                 }
                 runOnUiThread {
                     streamView?.text = reply.text
+                    if (streamView == null && reply.text.isNotBlank()) addBubble("bot", reply.text)
                     addSources(reply.sources)
                     scrollDown()
                     binding.sendButton.isEnabled = true
-                    voice?.onReply(reply.text)
+                    if (ttsBuf.isNotEmpty()) {
+                        VoiceCore.speakChunk(ttsBuf.toString())
+                        ttsBuf.setLength(0)
+                    }
+                    VoiceCore.endReply()
                 }
                 refreshBar()
             } catch (e: Exception) {
@@ -494,9 +501,27 @@ class ChatActivity : AppCompatActivity() {
                     addBubble("sys", "发送失败：${e.message ?: e.javaClass.simpleName}")
                     if (binding.input.text.isNullOrBlank()) binding.input.setText(msg)
                     binding.sendButton.isEnabled = true
-                    voice?.onTurnFailed()
+                    VoiceCore.onTurnFailed()
                 }
             }
+        }
+    }
+
+    /** 把流式片段按标点切句，逐句朗读。 */
+    private fun feedTts(chunk: String) {
+        if (!VoiceCore.isOn) return
+        ttsBuf.append(chunk)
+        var cut = ttsBuf.indexOfFirst { it in DONE_CHARS }
+        while (cut >= 0) {
+            val sentence = ttsBuf.substring(0, cut + 1)
+            ttsBuf.delete(0, cut + 1)
+            if (sentence.isNotBlank()) VoiceCore.speakChunk(sentence)
+            cut = ttsBuf.indexOfFirst { it in DONE_CHARS }
+        }
+        // 一直没标点（模型爱写长句）也不能干等
+        if (ttsBuf.length >= 60) {
+            VoiceCore.speakChunk(ttsBuf.toString())
+            ttsBuf.setLength(0)
         }
     }
 
@@ -582,4 +607,8 @@ class ChatActivity : AppCompatActivity() {
 
     private fun todayStr(): String =
         java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+
+    private fun toast(text: String) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
+    }
 }

@@ -17,8 +17,15 @@ android {
         applicationId = "com.studybot.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
+        // 手机只装 arm64；x86_64 留给模拟器自测（发布时再去掉）
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+    }
+
+    androidResources {
+        // SenseVoice 模型 228MB：不压缩，装机后拷到 filesDir 是磁盘速度
+        noCompress += listOf("onnx")
     }
 
     signingConfigs {
@@ -72,6 +79,8 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // 本地语音：sherpa-onnx（SenseVoice 识别 + Silero VAD），官方预编译 AAR
+    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
     // P5 笔记：中文 OCR（bundled，模型打进 apk，不依赖 GMS）
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }

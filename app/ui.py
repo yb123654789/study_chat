@@ -11,6 +11,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 import chat
@@ -85,6 +86,55 @@ def label(parent, text, size=10, bold=False, fg=TEXT, bg=CARD, **kw):
     return tk.Label(parent, text=text, font=F(size, bold), fg=fg, bg=bg, **kw)
 
 
+class ScrollHost(tk.Frame):
+    """页面外壳：内容比窗口高时出现滚动条，滚轮能上下看（设置页 2100px 高，以前滚不到）。
+
+    页面本身还是普通 Frame（各页的布局代码一行不用改），只是换了个「能滚的爹」。
+    内层高度 = max(内容需要的高度, 窗口高度)：内容少时照样铺满；
+    内容多时按内容高度铺，多出来的部分靠滚动。滚动条只在真需要时出现。
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0, takefocus=0)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=BG)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self._sb_visible = False
+        self.inner.bind("<Configure>", self._sync)
+        self.canvas.bind("<Configure>", self._sync)
+
+    def _sync(self, _ev=None) -> None:
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        need = self.inner.winfo_reqheight()
+        height = max(need, ch)
+        self.canvas.itemconfigure(self._win, width=cw, height=height)
+        self.canvas.configure(scrollregion=(0, 0, cw, height))
+        show = need > ch + 1
+        if show != self._sb_visible:        # 内容够高才挂滚动条，够不着时不留空条
+            self._sb_visible = show
+            if show:
+                self.vsb.pack(side="right", fill="y", before=self.canvas)
+            else:
+                self.vsb.pack_forget()
+                self.canvas.yview_moveto(0)
+
+    def scrollable(self) -> bool:
+        return self._sb_visible
+
+    def wheel(self, delta: int) -> None:
+        if not self._sb_visible or not delta:
+            return
+        steps = int(-delta / 120)
+        if steps == 0:                      # 触摸板给的是小 delta，至少滚一行
+            steps = -1 if delta > 0 else 1
+        self.canvas.yview_scroll(steps, "units")
+
+
 class App(tk.Tk):
     NAV = [("home", "总览"), ("study", "学习"), ("plan", "计划"), ("goals", "目标"),
            ("quiz", "题库"), ("materials", "资料"), ("knowledge", "知识库"),
@@ -99,6 +149,7 @@ class App(tk.Tk):
         self.minsize(1040, 700)
         self.configure(bg=BG)
         self._pages: dict[str, tk.Frame] = {}
+        self._hosts: dict[str, "ScrollHost"] = {}
         self._nav_buttons: dict[str, tk.Button] = {}
         self._current = ""
         self._toast = None
@@ -110,6 +161,7 @@ class App(tk.Tk):
         self.show("home")
         self.refresh_key_hint()
         self.update_pending_badge()
+        self.bind_all("<MouseWheel>", self._on_wheel)
         self.after(250, self._pump)
 
     # ---------------------------------------------------------------- 样式
@@ -235,11 +287,11 @@ class App(tk.Tk):
         for k, b in self._nav_buttons.items():
             b.configure(bg=ACCENT if k == key else SIDEBAR,
                         fg="#ffffff" if k == key else SIDE_FG)
-        for f in self._pages.values():
-            if f is not self._pages[key]:
-                f.pack_forget()
+        for k, h in self._hosts.items():
+            if k != key:
+                h.pack_forget()
         page = self._pages[key]
-        page.pack(fill="both", expand=True)
+        self._hosts[key].pack(fill="both", expand=True)
         self._current = key
         titles = {"home": "总览", "study": "学习 · 带练", "plan": "学习计划",
                   "goals": "学习目标", "quiz": "题库", "materials": "资料",
@@ -252,19 +304,64 @@ class App(tk.Tk):
             page.header(self.header_right)  # type: ignore[attr-defined]
         if hasattr(page, "refresh"):
             page.refresh()  # type: ignore[attr-defined]
+        # 页面刚建好时子控件还没排完版，reqheight 还是旧的；等这一轮布局结束再量一次滚动区
+        self.after_idle(self._hosts[key]._sync)
 
     def _build_page(self, key: str) -> tk.Frame:
-        return {
+        host = ScrollHost(self.body)
+        page = {
             "home": HomePage, "study": StudyPage, "plan": PlanPage, "goals": GoalsPage,
             "quiz": QuizPage, "materials": MaterialsPage, "knowledge": KnowledgePage,
             "review": ReviewPage, "settings": SettingsPage, "log": LogPage,
-        }[key](self.body, self)
+        }[key](host.inner, self)
+        page.pack(fill="both", expand=True)
+        self._hosts[key] = host
+        return page
+
+    def _on_wheel(self, ev):
+        """鼠标滚轮滚当前页。指针在 Text/Treeview 里时交给它们自己滚（聊天框、表格）。"""
+        try:
+            if ev.widget.winfo_toplevel() is not self:   # 小测弹窗上的滚轮别滚到后面那页
+                return
+        except Exception:  # noqa: BLE001
+            return
+        host = self._hosts.get(self._current)
+        if host is None or not host.scrollable():
+            return
+        if isinstance(ev.widget, (tk.Text, tk.Listbox, tk.Canvas, ttk.Treeview,
+                                  ttk.Combobox)):
+            return
+        host.wheel(int(getattr(ev, "delta", 0) or 0))
 
     # ---------------------------------------------------------------- 工具
     def toast(self, text: str, level: str = "info"):
         color = {"info": MUTED, "ok": OK, "warn": WARN, "err": ERR}.get(level, MUTED)
         self.status.configure(text=f"{now().strftime('%H:%M:%S')}  {text}", fg=color)
         self.db.log(text, level)
+
+    def report_callback_exception(self, exc, val, tb):
+        """按钮回调里的异常别只往 stderr 扔。
+
+        打包后没有控制台，Tk 的默认处理等于「点了没反应」——
+        2026-10-31「点开始拆没反应」就是 ui.py 少了 `from pathlib import Path` 的
+        NameError 被这么吞掉的。现在一律：写日志 + 状态栏 + 弹窗。
+        """
+        import traceback
+        detail = "".join(traceback.format_exception(exc, val, tb))
+        try:
+            self.db.log(detail[-1500:], "err")
+        except Exception:  # noqa: BLE001  远端断线时别在错误处理里再炸一次
+            pass
+        try:
+            self.toast(f"界面出错：{val}", "err")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            messagebox.showerror("界面出错",
+                                 f"{type(val).__name__}: {val}\n\n"
+                                 "详情已写进「日志」页，报告时把这段贴出来就行。")
+        except Exception:  # noqa: BLE001
+            pass
 
     def run_bg(self, fn, done=None, fail=None, tag: str = ""):
         """后台跑一个动作。给 tag 就防连点：同一件事没跑完再点直接忽略。"""
@@ -309,6 +406,10 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- 心跳
     def _pump(self):
+        # 当前页内容变了（任务列表、日志、处理进度）要重新量一次，滚动条才跟着出现/消失
+        host = self._hosts.get(self._current)
+        if host is not None:
+            host._sync()
         # 日志总线 → 当前页面刷新 / 日志页追加
         lines = []
         while True:
@@ -540,7 +641,7 @@ class StudyPage(tk.Frame):
         wrap.pack(fill="both", expand=True, pady=(10, 8))
         self.txt = tk.Text(wrap, font=F(10), bg="#fbfcfe", fg=TEXT, relief="flat", bd=0,
                            wrap="word", padx=14, pady=10, highlightthickness=0,
-                           spacing1=2, spacing3=2)
+                           spacing1=2, spacing3=2, height=12)   # 12 行就够：多出来的高度靠 expand，别把下面的输入框挤出窗口
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.txt.yview)
         self.txt.configure(yscrollcommand=sb.set)
         self.txt.pack(side="left", fill="both", expand=True)
@@ -1158,13 +1259,15 @@ class MaterialsPage(tk.Frame):
         row.pack(fill="x", pady=(10, 0))
         button(row, "处理 inbox（抽文本→归档）", self.process).pack(side="left")
         button(row, "拆目标 + 建知识库", self.derive).pack(side="left", padx=8)
-        button(row, "重建知识库", self.rebuild_kb, "ghost").pack(side="left")
+        button(row, "重建全库", self.rebuild_kb, "ghost").pack(side="left")
         self.cancel_btn = button(row, "取消", self.cancel, "ghost")
         self.cancel_btn.pack(side="left", padx=8)
         self.cancel_btn.configure(state="disabled")
         row2 = tk.Frame(top.inner, bg=CARD)
         row2.pack(fill="x", pady=(8, 0))
         button(row2, "打开 inbox", self.open_inbox, "ghost").pack(side="left")
+        button(row2, "打开待拆", self.open_pending, "ghost").pack(side="left", padx=8)
+        button(row2, "打开已拆", self.open_done, "ghost").pack(side="left")
         button(row2, "打开知识库", self.open_kb, "ghost").pack(side="left", padx=8)
         button(row2, "打开回收站", self.open_trash, "ghost").pack(side="left")
         button(row2, "清空回收站", self.clear_trash, "ghost").pack(side="left", padx=8)
@@ -1303,36 +1406,47 @@ class MaterialsPage(tk.Frame):
             self.after(400, self._drain)
 
     def derive(self):
-        """把新入库的资料交给模型拆成目标，然后重排这门课、重建知识库。"""
+        """打开「待拆」选择框：勾哪几份拆哪几份，先看预估费用。"""
         cid = self.app.course_id()
-        if not messagebox.askyesno(
-                "拆目标",
-                "把上次拆目标之后新入库的资料交给模型，拆成新目标并重排这门课。\n"
-                "要花一点 API 钱（约 ¥0.1/万字），确定？"):
-            return
-        self.app.toast("正在拆目标（可能要 10–60 秒）…", "info")
+        files = engine.pending_files(cid)
+        if not files:
+            return self.app.toast("待拆文件夹是空的：先处理 inbox，或把 txt 放进待拆", "warn")
+        DeriveDialog(self)
+
+    def _run_derive(self, files):
+        cid = self.app.course_id()
+        self.app.toast(f"开始拆目标（{len(files)} 份）…", "info")
+
+        def prog(msg):
+            self.app.after(0, lambda m=msg: self.app.status.configure(text=m))
 
         def done(r):
             self.refresh()
             if not r.get("added"):
-                return self.app.toast(r.get("note") or "没有新资料", "warn")
+                messagebox.showinfo("拆目标", r.get("note") or "没有新增目标")
+                return self.app.toast("没有新增目标（已拆的资料挪到「已拆」了）", "warn")
             titles = "\n".join(f"· {t}" for t in r["titles"][:12])
             messagebox.showinfo(
                 "拆好了",
                 f"新增 {r['added']} 个目标（{r['minutes']} 分钟，来自 {len(r['files'])} 份资料）：\n\n"
-                f"{titles}\n\n知识库写了 {r.get('knowledge', 0)} 个文件。\n计划已重排：\n"
+                f"{titles}\n\n本次 {r.get('chunks', 0)} 块 / {r.get('chars', 0):,} 字；"
+                f"{r.get('moved', 0)} 份已挪到「已拆」。\n"
+                f"知识库写了 {r.get('knowledge', 0)} 个文件。\n计划已重排：\n"
                 f"{r.get('note', '')}")
             self.app.toast(f"新增 {r['added']} 个目标，知识库和计划都更新了", "ok")
 
-        self.app.run_bg(lambda: engine.derive_goals(self.db, course=cid),
+        self.app.run_bg(lambda: engine.derive_goals(self.db, course=cid, files=files,
+                                                      progress=prog),
                         done, tag="derive")
 
     def rebuild_kb(self):
-        cid = self.app.course_id()
-        self.app.toast("正在重建知识库…", "info")
-        self.app.run_bg(lambda: engine.write_knowledge(self.db, course=cid),
-                        lambda r: (self.app.toast(f"知识库：写/更新 {r['written']} 个文件", "ok"),
-                                   self.refresh()), tag="kb")
+        self.app.toast("正在重建整个知识库（不分科目）…", "info")
+        self.app.run_bg(lambda: engine.write_knowledge(self.db),
+                        lambda r: (self.app.toast(
+                            f"知识库：写/更新 {r['written']} 个文件"
+                            + (f"，{r['changed']} 个改版" if r.get("changed") else "")
+                            + (f"，清理 {r['orphaned']} 个孤儿" if r.get("orphaned") else ""),
+                            "ok"), self.refresh()), tag="kb")
 
     # --- 打开文件夹
     def _open(self, p):
@@ -1343,8 +1457,14 @@ class MaterialsPage(tk.Frame):
     def open_inbox(self):
         self._open(paths.materials_dir(self.app.course_id()) / "inbox")
 
+    def open_pending(self):
+        self._open(paths.pending_dir(self.app.course_id()))
+
+    def open_done(self):
+        self._open(paths.done_dir(self.app.course_id()))
+
     def open_kb(self):
-        self._open(paths.knowledge_dir(self.app.course_id()))
+        self._open(paths.knowledge_dir())
 
     def open_trash(self):
         self._open(paths.trash_dir())
@@ -1370,19 +1490,19 @@ class MaterialsPage(tk.Frame):
         manifest = engine._manifest_read()
         items = [i for i in manifest.get("items", []) if i.get("course") == cid]
         done = [i for i in items if i.get("status") == "done"]
-        kb_dir = paths.knowledge_dir(cid)
-        kb = len([p for p in kb_dir.rglob("*.md")
-                  if p.name != "_索引.md" and ".history" not in p.parts]) if kb_dir.exists() else 0
+        kb = engine.kb_count(self.db, cid)             # 一条 SQL，不扫目录
+        kb_all = engine.kb_count(self.db)
         try:
-            pending = len(engine.new_materials(self.db, cid))
+            pending = len(engine.pending_files(cid))
         except Exception:  # noqa: BLE001
             pending = 0
         self.summary.configure(
             text=f"{self.app.course_name(cid)}：inbox 待处理 {len(files)} 份　"
-                 f"已归档 {len(done)} 份　知识库 {kb} 个目标"
-                 + (f"　⚠️ 有 {pending} 份新资料还没拆目标" if pending else "")
+                 f"已归档 {len(done)} 份　待拆 {pending} 份　"
+                 + ("知识库（瘦客户端不显示）" if getattr(self.db, "remote", False)
+                    else f"知识库本课 {kb} 个节点（全库 {kb_all}）")
                  + f"\n流程：资料丢进 materials/{cid}/inbox → 「处理 inbox」（抽文本、原件进回收站）"
-                   f" → 「拆目标 + 建知识库」→ 自动重排。")
+                   f" → 产物进「待拆」→ 勾选要拆的 → 拆成功后挪到「已拆」")
         for i in self.tree.get_children():
             self.tree.delete(i)
         for m in sorted(items, key=lambda x: x.get("processed_at") or "", reverse=True)[:300]:
@@ -1394,9 +1514,161 @@ class MaterialsPage(tk.Frame):
                 (m.get("processed_at") or "")[:16]))
 
 
+# ------------------------------------------------------------------ 拆目标：选资料
+class DeriveDialog(tk.Toplevel):
+    """「待拆」清单：搜索 / 过滤 / 多选，底部实时显示字数和预估费用。
+
+    默认一个都不勾；拆哪几份由你点。没有区块上限，只显示费用。
+    """
+
+    YUAN_PER_10K = 0.1          # 估算用；实际以 API 账单为准
+
+    def __init__(self, page: "MaterialsPage"):
+        super().__init__(page)
+        self.page = page
+        self.app = page.app
+        self.db = page.db
+        self.cid = self.app.course_id()
+        self.title("拆目标 · 选择要拆的资料")
+        self.geometry("900x640")
+        self.minsize(760, 480)
+        self.configure(bg=BG)
+        self.transient(page.winfo_toplevel())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        self.info: dict[str, tuple[int, float, float, str]] = {}
+        base = paths.pending_dir(self.cid)
+        for p in engine.pending_files(self.cid):
+            try:
+                t = p.read_text(encoding="utf-8", errors="replace")
+                mt = p.stat().st_mtime
+                rel = str(p.relative_to(base))
+            except (OSError, ValueError):
+                continue
+            cjk = sum(1 for ch in t if "\u4e00" <= ch <= "\u9fff") / max(1, len(t))
+            self.info[str(p)] = (len(t.strip()), cjk, mt, rel)
+
+        head = tk.Frame(self, bg=BG)
+        head.pack(fill="x", padx=18, pady=(16, 8))
+        label(head, "搜索", 9, False, MUTED, BG).pack(side="left")
+        self.q = tk.StringVar()
+        e = entry(head, width=30)
+        e.configure(textvariable=self.q)
+        e.pack(side="left", fill="x", expand=True, padx=(6, 14))
+        e.bind("<KeyRelease>", lambda _e: self._reload())
+        label(head, "过滤", 9, False, MUTED, BG).pack(side="left")
+        self.flt = tk.StringVar(value="全部")
+        cb = ttk.Combobox(head, textvariable=self.flt, width=10, state="readonly",
+                          values=("全部", "中文为主", "英文为主", "最近 7 天"), font=F(9))
+        cb.pack(side="left", padx=(6, 0))
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._reload())
+
+        wrap = tk.Frame(self, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        wrap.pack(fill="both", expand=True, padx=18)
+        cols = ("name", "chars", "blocks", "yuan", "when")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                                 selectmode="extended")
+        for c, t, w, a in [("name", "文件（待拆里）", 430, "w"),
+                           ("chars", "字数", 90, "center"),
+                           ("blocks", "块（2.4万字）", 110, "center"),
+                           ("yuan", "预估 ¥", 80, "center"),
+                           ("when", "修改时间", 130, "center")]:
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor=a)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sum())
+
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=18, pady=(10, 14))
+        self.sel_lbl = label(foot, "未选任何资料", 10, True, TEXT, BG)
+        self.sel_lbl.pack(side="left")
+        button(foot, "取消", self.destroy, "ghost").pack(side="right")
+        self.btn_go = button(foot, "开始拆", self._go)
+        self.btn_go.pack(side="right", padx=8)
+        self.btn_go.configure(state="disabled")
+        button(foot, "清空", self._none, "ghost").pack(side="right", padx=8)
+        button(foot, "全选（当前过滤）", self._all, "ghost").pack(side="right")
+        label(self, "费用按 ¥0.1/万字估（上限），实际以 API 账单为准；"
+                    "拆成功只把选中的挪到「已拆」，失败/取消不动。",
+              8, False, MUTED, BG).pack(anchor="w", padx=18, pady=(0, 12))
+
+        self._reload()
+        self.grab_set()
+        e.focus_set()
+
+    def _visible(self) -> list[str]:
+        q = self.q.get().strip().lower()
+        flt = self.flt.get()
+        now = time.time()
+        out = []
+        for iid, (chars, cjk, mt, rel) in self.info.items():
+            if q and q not in rel.lower():
+                continue
+            if flt == "中文为主" and cjk < 0.25:
+                continue
+            if flt == "英文为主" and cjk >= 0.25:
+                continue
+            if flt == "最近 7 天" and now - mt > 7 * 86400:
+                continue
+            out.append(iid)
+        out.sort(key=lambda i: self.info[i][3].lower())
+        return out
+
+    def _reload(self):
+        self.tree.delete(*self.tree.get_children())
+        for iid in self._visible():
+            chars, _cjk, mt, rel = self.info[iid]
+            blocks = (chars + 23999) // 24000
+            self.tree.insert("", "end", iid=iid, values=(
+                rel, f"{chars:,}", blocks, f"¥{chars / 10000 * self.YUAN_PER_10K:.2f}",
+                dt.datetime.fromtimestamp(mt).strftime("%m-%d %H:%M")))
+        self._sum()
+
+    def _sum(self):
+        sel = self.tree.selection()
+        chars = sum(self.info[i][0] for i in sel)
+        blocks = (chars + 23999) // 24000
+        yuan = chars / 10000 * self.YUAN_PER_10K
+        if sel:
+            self.sel_lbl.configure(
+                text=f"已选 {len(sel)} 份 / {chars:,} 字 / {blocks} 块 / 约 ¥{yuan:.2f}")
+        else:
+            self.sel_lbl.configure(text="未选任何资料（勾几份再开始）")
+        self.btn_go.configure(state="normal" if sel else "disabled")
+
+    def _all(self):
+        kids = self.tree.get_children()
+        if kids:
+            self.tree.selection_set(kids)
+
+    def _none(self):
+        self.tree.selection_remove(*self.tree.selection())
+
+    def _go(self):
+        sel = self.tree.selection()
+        if not sel:
+            return self.app.toast("先在上面点一份资料（Ctrl+点可多选），再点开始拆", "warn")
+        files = [Path(i) for i in sel]
+        chars = sum(self.info[i][0] for i in sel)
+        yuan = chars / 10000 * self.YUAN_PER_10K
+        if yuan >= 5 and not messagebox.askyesno(
+                "确认拆目标",
+                f"这次 {len(files)} 份 / {chars:,} 字 / {((chars + 23999) // 24000)} 块\n"
+                f"预估 ¥{yuan:.2f}\n\n继续？"):
+            return
+        self.destroy()
+        self.page._run_derive(files)
+
+
 # ------------------------------------------------------------------ 知识库（二级数据）
 class KnowledgePage(tk.Frame):
-    """知识库浏览器：`知识库/<课>/<章>/<目标>.md`。只读，改不了。"""
+    """知识库浏览器：**一个库，不分科目**，按章分组；每行标科目。
+
+    `知识库/<章>/<id>-<标题>.md`，只读，改不了；`_树.json` 是给知识树读的。
+    """
 
     def __init__(self, parent, app: App):
         super().__init__(parent, bg=BG)
@@ -1410,20 +1682,23 @@ class KnowledgePage(tk.Frame):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True)
 
-        left = tk.Frame(body, bg=CARD, highlightbackground=LINE, highlightthickness=1, width=380)
+        left = tk.Frame(body, bg=CARD, highlightbackground=LINE, highlightthickness=1, width=420)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
         self.tree = ttk.Treeview(left, columns=("min",), show="tree headings",
                                  selectmode="browse")
-        self.tree.heading("#0", text="章节 / 目标")
+        self.tree.heading("#0", text="章 / 节点（全库）")
         self.tree.heading("min", text="分钟")
-        self.tree.column("#0", width=300)
+        self.tree.column("#0", width=340)
         self.tree.column("min", width=56, anchor="center")
         sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._pick)
+        self.tree.bind("<<TreeviewOpen>>", self._on_open)
+        self._ch_of: dict[str, str] = {}
+        self._loaded: set[str] = set()
 
         right = tk.Frame(body, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
@@ -1439,18 +1714,20 @@ class KnowledgePage(tk.Frame):
 
     def header(self, parent):
         button(parent, "打开知识库文件夹", self.open_dir, "ghost").pack(side="right")
-        button(parent, "重建知识库", self.rebuild, "ghost").pack(side="right", padx=8)
+        button(parent, "重建全库", self.rebuild, "ghost").pack(side="right", padx=8)
 
     def rebuild(self):
-        cid = self.app.course_id()
-        self.app.toast("正在重建知识库…", "info")
-        self.app.run_bg(lambda: engine.write_knowledge(self.db, course=cid),
-                        lambda r: (self.app.toast(f"知识库：写/更新 {r['written']} 个文件", "ok"),
-                                   self.refresh()), tag="kb-rebuild")
+        self.app.toast("正在重建整个知识库（不分科目）…", "info")
+        self.app.run_bg(lambda: engine.write_knowledge(self.db),
+                        lambda r: (self.app.toast(
+                            f"知识库：写/更新 {r['written']} 个文件"
+                            + (f"，{r['changed']} 个改版" if r.get("changed") else "")
+                            + (f"，清理 {r['orphaned']} 个孤儿" if r.get("orphaned") else ""),
+                            "ok"), self.refresh()), tag="kb-rebuild")
 
     def open_dir(self):
         import os
-        p = paths.knowledge_dir(self.app.course_id())
+        p = paths.knowledge_dir()
         p.mkdir(parents=True, exist_ok=True)
         os.startfile(p)  # noqa: S606
 
@@ -1466,6 +1743,19 @@ class KnowledgePage(tk.Frame):
         except OSError as e:
             self._render(f"读不出来：{e}")
 
+    def _on_open(self, _ev=None):
+        """展开章节点时才去库里拉这一章的节点（2000 个节点也不怕）。"""
+        iid = self.tree.focus()
+        ch = self._ch_of.get(iid)
+        if not ch or ch in self._loaded:
+            return
+        for r in engine.knowledge_list(self.db, chapter=ch):
+            kid = self.tree.insert(
+                iid, "end", text=f"[{r['course']}] {r['id']}  {r['title']}",
+                values=(r["minutes"] or "",))
+            self._by_iid[kid] = r
+        self._loaded.add(ch)
+
     def _render(self, md: str):
         self.txt.configure(state="normal")
         self.txt.delete("1.0", "end")
@@ -1480,27 +1770,35 @@ class KnowledgePage(tk.Frame):
         self.txt.see("1.0")
 
     def refresh(self):
-        cid = self.app.course_id()
-        rows = engine.knowledge_list(cid)
+        if getattr(self.db, "remote", False):
+            # 瘦客户端：知识库文件在服务器本机，桌面这端读不到；不显示成「空的」误导人
+            self.tree.delete(*self.tree.get_children())
+            self._by_iid, self._ch_of, self._loaded = {}, {}, set()
+            self.summary.configure(
+                text="瘦客户端模式：知识库只存在服务器那台机器的数据目录里。\n"
+                     "在服务器上打开桌面程序才能看/重建；手机端本来就不提供知识库。")
+            self._render("（瘦客户端模式，不加载知识库）")
+            return
+        chs = engine.kb_chapters(self.db)               # 先列章（一条 SQL），节点展开再拉
         self.tree.delete(*self.tree.get_children())
         self._by_iid = {}
-        if not rows:
+        self._ch_of = {}
+        self._loaded: set[str] = set()
+        if not chs:
             self.summary.configure(
-                text=f"{self.app.course_name(cid)}：知识库还是空的。"
-                     f"去「资料」页点「拆目标 + 建知识库」，或点右上角「重建知识库」。")
+                text="知识库还是空的。去「资料」页点「拆目标 + 建知识库」，"
+                     "或点右上角「重建全库」。")
             self._render("（空）")
             return
-        chapters: dict[str, str] = {}
-        for r in rows:
-            ch = r["chapter"] or "未分章"
-            if ch not in chapters:
-                chapters[ch] = self.tree.insert("", "end", text=ch, open=True, values=("",))
-            iid = self.tree.insert(chapters[ch], "end", text=f"{r['id']}  {r['title']}",
-                                   values=(r["minutes"] or "",))
-            self._by_iid[iid] = r
+        for c in chs:
+            ch = c["chapter"] or "未分章"
+            iid = self.tree.insert("", "end", text=f"{ch}（{c['n']}）", open=False,
+                                   values=("",))
+            self._ch_of[iid] = ch
+        total = sum(int(c["n"] or 0) for c in chs)
         self.summary.configure(
-            text=f"{self.app.course_name(cid)}：{len(rows)} 个目标 / {len(chapters)} 章　"
-                 f"{paths.knowledge_dir(cid)}\n只读：内容随「重新处理资料」生成，平时手动改不了。")
+            text=f"全库 {total} 个节点 / {len(chs)} 章　{paths.knowledge_dir()}\n"
+                 f"不分科目：按章排，点章展开；_树.json 是给知识树读的。只读，不手改。")
 
 
 # ------------------------------------------------------------------ 待确认
@@ -1736,6 +2034,17 @@ class SettingsPage(tk.Frame):
         self.f_key = self._field(c2.inner, "DeepSeek API Key（必填；聊天、出题要用，看计划不需要）",
                                  show="•")
         self.f_model = self._field(c2.inner, "模型名")
+        self.f_en = tk.BooleanVar(value=(self.db.get("en_query", "") == "1"))
+        tk.Checkbutton(
+            c2.inner,
+            text="英文资料也参与检索（聊天时把中文问题翻成英文检索词）",
+            variable=self.f_en, font=F(9), bg=CARD, fg=TEXT, activebackground=CARD,
+            selectcolor=CARD, anchor="w", highlightthickness=0, bd=0,
+            cursor="hand2").pack(anchor="w", pady=(6, 0))
+        label(c2.inner,
+              "打开后每次提问会多调一次小模型（约 +1 秒、<¥0.001）；只影响聊天检索，"
+              "知识库仍按中文检索。关掉就是纯中文检索。",
+              8, False, MUTED, CARD).pack(anchor="w", pady=(2, 0))
         row4 = tk.Frame(c2.inner, bg=CARD)
         row4.pack(fill="x", pady=(10, 0))
         button(row4, "保存模型设置", self.save_model).pack(side="left")
@@ -1758,6 +2067,10 @@ class SettingsPage(tk.Frame):
         button(row4b, "打开工具文件夹", self.open_tools, "ghost").pack(side="left")
         label(c2b.inner, "没装也不影响文本类资料；图片/视频会留在 inbox 里等工具装好再处理。",
               8, False, MUTED).pack(anchor="w", pady=(8, 0))
+        label(c2b.inner, "扫描版 PDF 会自动用 tesseract OCR（只对没文字的页）；"
+                         ".doc/.ppt 用本机 Office 或 LibreOffice 另存为 docx/pptx 再读，"
+                         "转换前请先关掉 Word/PowerPoint。",
+              8, False, MUTED).pack(anchor="w", pady=(2, 0))
         label(c2b.inner, "换电脑时从这几个地方下（工具放 %LOCALAPPDATA%\\学习bot\\tools 就行）：",
               8, False, MUTED).pack(anchor="w", pady=(6, 2))
         row4c = tk.Frame(c2b.inner, bg=CARD)
@@ -1834,7 +2147,15 @@ class SettingsPage(tk.Frame):
             return "127.0.0.1"
 
     def _conn_info(self) -> tuple[str, str, str]:
-        """(地址, token, 来源说明)。瘦客户端看 desktop.json，本地看 server.json。"""
+        """(地址, token, 来源说明)。
+
+        本地模式优先用桌面端自己起的服务（`app.local_server`）；瘦客户端看 desktop.json；
+        都没有再退回读 server.json。
+        """
+        ls = getattr(self.app, "local_server", None)
+        if ls is not None:
+            state = "运行中" if ls.running else ls.status_text()
+            return ls.url, ls.token, f"本机服务（{state}）"
         p = paths.desktop_config()
         cfg: dict = {}
         if p.exists():
@@ -1857,12 +2178,13 @@ class SettingsPage(tk.Frame):
     def refresh_conn(self) -> None:
         url, token, src = self._conn_info()
         self.conn_url.configure(text=url)
-        self.conn_token.configure(text=token or "（还没有 token：先跑一次 server/run.py）")
+        self.conn_token.configure(text=token or "（还没有 token：服务没起来，见下面原因）")
         self.conn_note.configure(
             text=f"来源：{src}\n"
+                 "服务随桌面软件一起起停：**不用再单独开 server/run.py**。\n"
                  "地址会变：路由器重新分配 IP 时这里跟着变，手机填新的那串就行。\n"
-                 "token 不会自己变：只有删掉 server.json 再启动服务端，才会重新生成。\n"
-                 "手机和电脑要同一个 WiFi；连不上先确认电脑上跑着 server/run.py（端口 8787）。")
+                 "token 不会自己变：只有删掉数据目录里的 server.json 再重启，才会重新生成。\n"
+                 "手机和电脑要同一个 WiFi，Windows 防火墙要放行 8787 入站。")
 
     def _copy(self, text: str) -> None:
         text = (text or "").strip()
@@ -1973,6 +2295,7 @@ class SettingsPage(tk.Frame):
         if key != "****":                # **** = 服务器上已有，别覆盖；空 = 清掉
             self.db.set("api_key", key)
         self.db.set("model", self.f_model.get().strip() or "deepseek-flash")
+        self.db.set("en_query", "1" if self.f_en.get() else "0")
         self.app.refresh_key_hint()
         self.app.toast("模型设置已保存" if key else "已清空模型 key：聊天不可用，看计划不受影响",
                        "ok" if key else "warn")

@@ -7,67 +7,58 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
+import java.io.File
 
 /**
- * 语音自检：把「本 App 权限」和「系统识别服务」分开显示。
+ * 语音自检：把「本 App 能录」「本地模型在不在」「能不能打断」分开显示。
  *
- * 常见误判：系统设置里给学习bot开了麦克风，但真正录音的是手机自带的识别服务，
- * 那个服务没有权限 / 没有实现，就会报 ERROR_INSUFFICIENT_PERMISSIONS。
- * 这时提示「没给麦克风权限」会让人一直去翻本 App 的开关。
+ * 背景：以前语音走系统识别服务，小米/HyperOS 上那个服务被第三方调用时拒录音
+ * （ERROR_INSUFFICIENT_PERMISSIONS），本 App 权限没问题也没用。
+ * 现在改成自己录音 + 本地 SenseVoice，所以自检也要跟着改。
  */
 object VoiceSelfCheck {
 
     fun report(ctx: Context): String {
         val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        val available = try {
-            SpeechRecognizer.isRecognitionAvailable(ctx)
-        } catch (_: Exception) {
-            false
-        }
-        val recognizers = runCatching {
-            ctx.packageManager
-                .queryIntentServices(Intent("android.speech.RecognitionService"), 0)
-                .map { "${it.serviceInfo.packageName}/${it.serviceInfo.name}" }
-        }.getOrDefault(emptyList())
-        val ttsEngines = runCatching {
-            ctx.packageManager
-                .queryIntentServices(Intent("android.intent.action.TTS_SERVICE"), 0)
-                .map { it.serviceInfo.packageName }
-                .distinct()
-        }.getOrDefault(emptyList())
-        // 系统语音输入面板（输入法/语音助手）；内置识别坏了就靠它
-        val voiceApps = runCatching {
-            ctx.packageManager
-                .queryIntentActivities(
-                    Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0
-                )
-                .map { it.activityInfo.packageName }
-                .distinct()
-        }.getOrDefault(emptyList())
+        val modelReady = ModelFiles.ready(ctx)
+        val modelFile = File(ModelFiles.paths(ctx).model)
+        val state = VoiceCore.state.value
 
         return buildString {
             append("本 App 录音权限：").append(if (granted) "已授予" else "未授予").append('\n')
-            append("系统语音识别：").append(if (available) "可用" else "不可用").append('\n')
-            append("识别服务：")
-            append(if (recognizers.isEmpty()) "（没找到）" else recognizers.joinToString("、"))
+            append("语音状态：").append(
+                when (state) {
+                    VoiceCore.State.OFF -> "关着"
+                    VoiceCore.State.PREPARING -> "正在准备"
+                    VoiceCore.State.LISTENING -> "正在听"
+                    VoiceCore.State.THINKING -> "在想"
+                    VoiceCore.State.SPEAKING -> "正在说"
+                }
+            ).append('\n')
+            append("本地模型：")
+            if (modelReady) {
+                append("已就绪（").append("%.1f".format(modelFile.length() / 1048576.0)).append(" MB）")
+            } else {
+                append("还没准备好（第一次点「开始」会自动拷，约 20 秒）")
+            }
             append('\n')
-            append("朗读引擎：")
-            append(if (ttsEngines.isEmpty()) "（没找到）" else ttsEngines.joinToString("、"))
+            append("回声消除：")
+            append(if (VoiceCore.bargeInAvailable) "可用（能插嘴打断）" else "不可用（只能点「打断」）")
             append('\n')
-            append("系统语音面板：")
-            append(if (voiceApps.isEmpty()) "（没找到）" else voiceApps.joinToString("、"))
-            append('\n')
+            append("识别方式：本地 SenseVoice（离线，不联网）\n")
+            if (VoiceCore.lastError.isNotBlank()) {
+                append("上次错误：").append(VoiceCore.lastError).append('\n')
+            }
             append("系统：Android ").append(Build.VERSION.RELEASE)
             append("（SDK ").append(Build.VERSION.SDK_INT).append("）\n")
             append("机型：").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n')
             append('\n')
             append(
                 if (!granted) "→ 本 App 的麦克风没开：去设置 → 应用 → 学习bot → 权限 → 麦克风。"
-                else if (!available) "→ 本 App 有权限，但手机没有系统识别服务：用「系统语音输入」或打字。"
-                else "→ 两边都在。若仍报没权限，多半是识别服务自己的开关，换「系统语音输入」试试。"
+                else if (!modelReady) "→ 点一次「开始」，让它把模型拷好；之后完全离线。"
+                else "→ 都正常。点「开始」之后一直说话就行，说完停一下就发。"
             )
         }
     }

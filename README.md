@@ -13,7 +13,9 @@
 最新安装包在 [Releases](https://github.com/yb123654789/study_chat/releases)：
 
 - `StudyBot-desktop-win64.zip`：解压后双击 `学习bot-app\学习bot.exe`，第一次选数据目录
-- `StudyBot-android-v0.1.0.apk`：Android 7+，安装时允许未知来源
+- `StudyBot-android-x.y.z.apk`：Android 7+，安装时允许未知来源（v0.3.0 约 323 MB，内置离线语音模型）
+
+文档：[项目介绍](项目介绍.md)（功能、架构、怎么跑） · [开发计划](开发计划.md)（进度、待办、坑）
 
 ## 手机上怎么连电脑
 
@@ -41,11 +43,11 @@
 |---|---|
 | `app/` | 桌面软件（Tkinter）：界面、SQLite、排程、带练聊天、远程客户端、自检 |
 | `server/` | 服务端：HTTP API、`/api/mobile/snapshot`（手机下行）、`/api/mobile/events`（手机上行）、部署说明 |
-| `android/` | Android 工程：六个 tab（今日/计划/目标/题库/聊天/笔记）、本地 Room、检索、出题判分、语音、OCR、冲突裁定 |
+| `android/` | Android 工程：单窗口聊天（`ChatActivity`）、本地 Room、检索、出题判分、离线语音（sherpa-onnx + SenseVoice）、笔记/OCR、冲突裁定 |
 | `tools/` | 资料抽取、检索、确定性排程（planner）、自检 |
 | `prompts/` | 拆目标 / 出题 / 批改的提示词与降级策略 |
-| `施工计划.md` | 手机 App P0–P8 的任务清单、验收与进度看板 |
-| `HANDOFF.md` | 交接单：当前状态、已定的架构决定、坑、下一步 |
+| `项目介绍.md` | 功能清单、架构、数据规则、怎么跑、自检 |
+| `开发计划.md` | 进度、已验证/未验证、下一步、坑、不能推翻的决定 |
 
 ## 自己构建
 
@@ -59,25 +61,29 @@ py -3.14 -m pip install pyinstaller
 Android：
 
 ```powershell
-cd android
-.\gradlew assembleRelease
-# 或直接用本机 Gradle：gradle -p android assembleRelease
+gradle -p android :app:assembleRelease
 ```
 
 签名配置在 `android/keystore/keystore.properties`（不进仓库；没有这个文件时 release 构建不签名）。
 
+> **语音模型和 sherpa-onnx AAR 不进仓库**（v0.3.0 起，约 275 MB）。编 APK 前要先放好，
+> 下载命令在 [开发计划](开发计划.md) 的「构建前提」一节。没有它们 gradle 一样能编过，
+> 但 App 里点「开始」会报模型缺失。
+
 ## 自检
 
 ```powershell
-py -X utf8 app\selftest.py        # 桌面端 + 数据层，125 项
+py -X utf8 app\selftest.py        # 桌面端 + 数据层
 py -X utf8 app\uismoke.py         # 10 个页面冒烟
-py -X utf8 server\test_api.py     # 服务端/手机接口，54 项
+py -X utf8 server\test_api.py     # 服务端/手机接口
 py -X utf8 tools\test_planner.py  # 排程
 ```
 
 ## 已知限制
 
-- **真机验收还没跑完**：方案 §16 的 13 条（飞行模式、待确认、语音、OCR 等）需要真手机，清单在 `HANDOFF.md`。
-- 安卓 APK 约 48–50 MB（内置中文 OCR 模型）；要瘦身可只保留 `arm64-v8a`。
+- **真机验收还没跑完**：手机语音、笔记 OCR、待确认等要真手机，清单在 [开发计划](开发计划.md)。
+- 安卓 APK **约 323 MB**（v0.3.0：内置 SenseVoice 228 MB + sherpa-onnx 两套 ABI）。语音完全离线，
+  不联网、不花钱；代价是包大、首次启动要拷 228 MB 到应用私有目录（手机存储留 500 MB）。
+- 语音只有 **arm64 + x86_64** 两个 ABI；x86_64 是给模拟器自测的，发版可去掉（省 45 MB）。
 - 手机本地的出题题目存在内存里，退出 App 会重新出题。
 - 服务端暂不存裁决表，冲突裁定只回传 `settings` + 日志，快照里不下发。

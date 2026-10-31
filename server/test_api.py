@@ -52,7 +52,8 @@ QUIZ_JSON = json.dumps({"questions": [
 ]}, ensure_ascii=False)
 
 
-def fake_chat(messages, db=None, max_tokens=800, temperature=0.7, timeout=90):
+def fake_chat(messages, db=None, max_tokens=800, temperature=0.7, timeout=90,
+              extra=None):
     sys_prompt = messages[0]["content"]
     if "出题人" in sys_prompt:
         return QUIZ_JSON
@@ -62,7 +63,8 @@ def fake_chat(messages, db=None, max_tokens=800, temperature=0.7, timeout=90):
     return "讲解：先看定义，再看代价。"
 
 
-def fake_tools(messages, tools=None, db=None, max_tokens=800, temperature=0.7, timeout=90):
+def fake_tools(messages, tools=None, db=None, max_tokens=800, temperature=0.7, timeout=90,
+               extra=None):
     if any(m.get("role") == "tool" for m in messages):
         return {"text": "好，开始小测。", "tool_calls": [], "finish": "stop",
                 "tokens": 10, "usage": {}, "model": "fake"}
@@ -87,7 +89,7 @@ def main() -> int:
         encoding="utf-8")
     d = dbmod.DB(tmp / "test.db")
     d.init()
-    d.import_goals(BASE / "data" / "goals.json")
+    d.import_goals(BASE / "tests" / "fixtures" / "mini_goals.json")
     engine.regenerate(d)
     d.set("api_key", "sk-test-only")
 
@@ -101,10 +103,10 @@ def main() -> int:
     db = RemoteDB(f"http://127.0.0.1:{port}", "testtoken", timeout=60)
     try:
         check("健康检查", db.call("GET", "/api/health")["ok"] is True)
-        check("状态里有统计", db.stats()["total_goals"] == 59, str(db.stats()["total_goals"]))
+        check("状态里有统计", db.stats()["total_goals"] == 31, str(db.stats()["total_goals"]))
         local_ids = [t["id"] for t in d.today_tasks()]
         check("今日任务和服务器一致", [t["id"] for t in db.today_tasks()] == local_ids)
-        check("目标列表", len(db.goals()) == 59, str(len(db.goals())))
+        check("目标列表", len(db.goals()) == 31, str(len(db.goals())))
         check("题库列表", len(db.all_quiz()) == len(d.all_quiz()))
         check("密钥不下发", db.get("api_key") == "****", db.get("api_key"))
         check("token 掩码", db.get("tg_token") in ("", "****"), db.get("tg_token"))
@@ -207,7 +209,7 @@ def main() -> int:
         # 手机下行快照（P1）：四页数据 + 块指纹/增量 + rev 前进 + 空库
         snap = db.call("GET", "/api/mobile/snapshot")
         check("快照四页数据齐全",
-              len(snap["goals"]) >= 59 and bool(snap["courses"]) and bool(snap["tasks"])
+              len(snap["goals"]) >= 31 and bool(snap["courses"]) and bool(snap["tasks"])
               and "quiz_stats" in snap,
               f'{len(snap["goals"])} / {len(snap["courses"])} / {len(snap["tasks"])}')
         blocks = snap.get("blocks") or []

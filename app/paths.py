@@ -171,11 +171,25 @@ def extracted_dir(course: str | None = None) -> Path:
     return base / course if course and course != "ds" else base
 
 
+def pending_dir(course: str | None = None) -> Path:
+    """待拆：处理 inbox 之后、还没拆目标的 txt（按课程分，一个文件夹就是队列）。"""
+    return _r() / "extracted" / "待拆" / (course or "ds")
+
+
+def done_dir(course: str | None = None) -> Path:
+    """已拆：拆过目标的 txt 挪到这里；检索仍然扫得到。"""
+    return _r() / "extracted" / "已拆" / (course or "ds")
+
+
 # ---------------------------------------------------------------- 一级 / 二级
 def knowledge_dir(course: str | None = None) -> Path:
-    """二级数据：课程内容（每个目标一个 .md）。只由「重处理」改写。"""
-    base = _r() / "知识库"
-    return base / course if course and course != "ds" else base
+    """二级数据：**一个知识库根，不分科目**（2026-10-31 改）。
+
+    每个目标一个 .md，按「章」分目录；科目只写在 front matter 的 `course:` 里，
+    为以后的跨课程知识树留位置。course 参数保留只是为了调用点不用全改，
+    已经不参与路径——传什么都返回同一个根。
+    """
+    return _r() / "知识库"
 
 
 def trash_dir() -> Path:

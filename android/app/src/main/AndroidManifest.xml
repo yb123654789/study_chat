@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 语音笔记 / 语音聊天：SpeechRecognizer 要录音；相机不声明权限，走系统相机 Activity（TakePicture） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 语音对话要长时间开着麦克风：前台服务 + 通知（Android 14+ 要 mic 类型，13+ 要通知权限） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Android 11+ 要显式声明才能发现系统语音识别服务 / 相机应用 / TTS 引擎 -->
     <queries>
@@ -26,6 +31,7 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
+        android:largeHeap="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.StudyBot"
         android:usesCleartextTraffic="true">
@@ -71,6 +77,12 @@
             android:exported="false"
             android:label="纠错预览"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- 语音会话：前台服务保活，麦克风常开（Android 14+ 必须声明 microphone 类型） -->
+        <service
+            android:name=".voice.VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- 拍照存 filesDir/notes/，用 FileProvider 给相机写 -->
         <provider

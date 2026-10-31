@@ -13,17 +13,33 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "libs"))
+# pypdf 不靠 pip：仓库里带了一份纯 Python 的，放在 tools/libs/pypdf。
+# 开发时 __file__ 在 tools/ 下；打包后 __file__ 在 _internal/ 下（spec 的 DATAS
+# 把 tools/libs 拷到 _internal/libs），所以两个位置都要试。
+_HERE = Path(__file__).resolve().parent
+for _p in (_HERE / "libs",) + ((Path(sys._MEIPASS) / "libs",) if getattr(sys, "_MEIPASS", "") else ()):
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 BASE = Path(__file__).resolve().parent.parent
 SRC = BASE / "materials" / "scut" / "大二上课程资料" / "数据结构"
 OUT = BASE / "extracted"
 BOOK_PAGE_CAP = 60          # 大部头教材只抽前 60 页，够看结构
 PDF_PAGE_CAP = 400
+OCR_DPI = 200               # 扫描版 PDF 渲染分辨率（tesseract 最舒服的档）
+OCR_PAGE_CAP = 120          # 整份没文字层的，最多 OCR 这么多页（防止几百页扫描件跑一整天）
+OCR_MISSING_CAP = 40        # 有文字层、只有少数页缺字的，最多补 OCR 这么多页
+OCR_MIN_TEXT = 60           # 一页文字少于这么多字，就当「可能只有水印/图」补一次 OCR
+OFFICE_TIMEOUT = 240        # Word/PowerPoint 另存为的等待上限（秒）
+
+# 能直接读出文字的扩展名（.doc/.ppt 要先经 Office/LibreOffice 转成 docx/pptx）
+TEXT_EXT = {".pdf", ".docx", ".pptx", ".md", ".txt", ".doc", ".ppt"}
 
 
 def clean(s: str) -> str:
@@ -68,22 +84,316 @@ def docx_text(p: Path) -> str:
             out.append(t)
     return "\n".join(out)
 
-def pdf_text(p: Path) -> str:
-    from pypdf import PdfReader
+def _pdfium():
+    """PDFium（pypdfium2）：扫描版 PDF 渲染 + AES 加密 PDF 的文本/渲染。
 
-    r = PdfReader(str(p))
+    没装就抛 MissingTool（原件留着），不要让整份资料静默失败。
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as e:
+        raise MissingTool(
+            "pdfium",
+            "扫描版 / 加密 PDF 要 pypdfium2：打包版请重新打包（spec 已带）；"
+            "源码运行 py -m pip install pypdfium2") from e
+    return pdfium
+
+
+def _render_ppm(page, dest: Path, dpi: int = OCR_DPI) -> bool:
+    """PDF 页 → PPM（P6，tesseract 直接能读）。几乎全白的页返回 False，不浪费 OCR 时间。"""
+    try:
+        bmp = page.render(scale=dpi / 72, rev_byteorder=True)
+    except TypeError:                 # 老版本 pypdfium2 没有 rev_byteorder
+        bmp = page.render(scale=dpi / 72)
+    try:
+        buf = bytes(bmp.buffer)
+        if not buf:
+            return False
+        if getattr(bmp, "mode", "RGB") != "RGB" and getattr(bmp, "n_channels", 3) == 3:
+            arr = bytearray(buf)      # BGR → RGB（逐字节切片，C 速度）
+            arr[0::3], arr[2::3] = arr[2::3], arr[0::3]
+            buf = bytes(arr)
+        if min(buf) > 240:            # 空白页
+            return False
+        with open(dest, "wb") as f:
+            f.write(f"P6\n{bmp.width} {bmp.height}\n255\n".encode("ascii"))
+            f.write(buf)
+        return True
+    finally:
+        bmp.close()
+
+
+def _ocr_ppm(ppm: Path, tesseract: str = "", tessdata: str = "") -> str:
+    """对一张图跑 tesseract：先中英混排，缺中文语言包就退回英文。"""
+    exe = _tool(tesseract, "tesseract")
+    for lang in ("chi_sim+eng", "eng"):
+        cmd = [exe, str(ppm), "stdout", "-l", lang]
+        if tessdata and Path(tessdata).is_dir():
+            cmd += ["--tessdata-dir", str(tessdata)]
+        r = run_tool(cmd, timeout=300)
+        if r.returncode == 0:
+            got = clean(r.stdout or "")
+            if got:
+                return got
+    return ""
+
+
+def _ocr_pdf_page(page, tesseract: str = "", tessdata: str = "") -> str:
+    tmp = Path(tempfile.mkdtemp(prefix="studybot-ocr-"))
+    try:
+        ppm = tmp / "p.ppm"
+        if not _render_ppm(page, ppm):
+            return ""
+        return _ocr_ppm(ppm, tesseract, tessdata)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def pdf_text(p: Path, tools: dict | None = None, on_progress=None) -> str:
+    """PDF → 文本：先 pypdf；AES/解析不了就换 PDFium；没文字层的页再 OCR。
+
+    - 正常 PDF 完全不碰 OCR（不慢）
+    - 扫描版：PDFium 把页渲染成图 → tesseract（chi_sim+eng）
+    - AES 加密（空口令）：PDFium 能解密并抽字；Word 打不开这种文件
+    """
+    t = tools or {}
     cap = BOOK_PAGE_CAP if p.stat().st_size > 15 * 1024 * 1024 else PDF_PAGE_CAP
-    pages = []
-    for i, page in enumerate(r.pages[:cap], 1):
+    pages: dict[int, str] = {}
+    total = 0
+    doc = None
+    try:
         try:
-            t = clean(page.extract_text() or "")
-        except Exception:
-            t = ""
-        if t:
-            pages.append(f"## p.{i}\n{t}")
-    if len(r.pages) > cap:
-        pages.append(f"\n…（共 {len(r.pages)} 页，只抽了前 {cap} 页）")
-    return "\n\n".join(pages)
+            from pypdf import PdfReader
+            reader = PdfReader(str(p))
+            total = len(reader.pages)
+            for i in range(min(total, cap)):
+                try:
+                    tx = clean(reader.pages[i].extract_text() or "")
+                except Exception:  # noqa: BLE001 单页坏了不影响其它页
+                    tx = ""
+                if tx:
+                    pages[i] = tx
+        except ImportError as e:      # 打包漏了 tools/libs 时会走到这里
+            raise MissingTool(
+                "pypdf",
+                "PDF 解析缺 pypdf：打包版要把 tools/libs 一起打进去（spec 已加）；"
+                "源码运行可用 tools/libs/pypdf 或 py -m pip install pypdf") from e
+        except Exception:             # noqa: BLE001  AES 加密 / 解析库报错 → PDFium
+            doc = _pdfium().PdfDocument(str(p))
+            total = len(doc)
+            for i in range(min(total, cap)):
+                try:
+                    tp = doc[i].get_textpage()
+                    tx = clean(tp.get_text_range() or "")
+                    tp.close()
+                except Exception:  # noqa: BLE001
+                    tx = ""
+                if tx:
+                    pages[i] = tx
+
+        # 文字很少的页也要补 OCR：扫描书常带一层「关注公众号」水印，
+        # pypdf/PDFium 每页只能抽出那几十个字，正文其实全是图。
+        missing = [i for i in range(min(total, cap))
+                   if len(pages.get(i, "")) < OCR_MIN_TEXT]
+        if missing:
+            limit = OCR_PAGE_CAP if not pages else OCR_MISSING_CAP
+            todo = missing[:limit]
+            if doc is None:
+                try:
+                    doc = _pdfium().PdfDocument(str(p))
+                except MissingTool:
+                    if not pages:       # 一个字都没抽到，又没 PDFium：只能留原件
+                        raise
+                    doc = None          # 已有文字：跳过 OCR，别把整份判成缺工具
+            for n, i in enumerate(todo, 1):
+                if doc is None:
+                    break
+                if on_progress:
+                    on_progress(n, len(todo))
+                try:
+                    tx = _ocr_pdf_page(doc[i], t.get("tesseract", ""), t.get("tessdata", ""))
+                except MissingTool:
+                    if not pages:       # 纯扫描件又没 tesseract：留原件
+                        raise
+                    break               # 有文字，OCR 不可用就到此为止
+                except Exception:  # noqa: BLE001 单页 OCR 失败不拖垮整份
+                    tx = ""
+                if tx and len(tx) > len(pages.get(i, "")):   # 水印页用 OCR 的正文替换
+                    pages[i] = tx
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not pages:
+        raise ValueError("没抽出文字（扫描件/空文件，OCR 也没有结果）")
+    out = [f"## p.{i + 1}\n{pages[i]}" for i in sorted(pages)]
+    if total > cap:
+        out.append(f"\n…（共 {total} 页，只抽了前 {cap} 页）")
+    return "\n\n".join(out)
+
+
+# ------------------------------------------------------------------ .doc / .ppt
+# 老格式（Word 97-2003 / PowerPoint 97-2003）没有可用的纯 Python 解析器：
+#   - 有 LibreOffice：headless 转 docx/pptx；
+#   - Windows 上有 Office：后台起隐藏的 Word/PowerPoint 另存为 docx/pptx；
+# 转出来的文件用现成的标准库解析（docx_text / pptx_text），然后删临时文件。
+_PS_CONV = r"""
+param([string]$Src, [string]$Dst, [string]$Kind)
+$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$app = $null
+$doc = $null
+try {
+  if ($Kind -eq "doc") {
+    $app = New-Object -ComObject Word.Application
+    $app.Visible = $false
+    $app.DisplayAlerts = 0
+    try { $app.AutomationSecurity = 3 } catch { }
+    $doc = $app.Documents.Open($Src, $false, $true, $false)
+    $doc.SaveAs2($Dst, 12)
+    $doc.Close(0)
+    $doc = $null
+  } else {
+    $app = New-Object -ComObject PowerPoint.Application
+    $doc = $app.Presentations.Open($Src, $true, $false, $false)
+    $doc.SaveAs($Dst, 24)
+    $doc.Close()
+    $doc = $null
+  }
+  Write-Output "OK"
+} finally {
+  if ($null -ne $doc) { try { $doc.Close() } catch { } }
+  if ($null -ne $app) { try { $app.Quit() } catch { } }
+}
+"""
+
+
+def find_soffice() -> str:
+    """找 LibreOffice 的 soffice.exe（设置里没填也不要紧，装了就能用）。"""
+    found = shutil.which("soffice") or shutil.which("soffice.exe")
+    if found:
+        return found
+    bases = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
+             os.environ.get("LOCALAPPDATA")]
+    rels = (r"LibreOffice\program\soffice.exe", r"Programs\LibreOffice\program\soffice.exe")
+    for base in bases:
+        if not base:
+            continue
+        for rel in rels:
+            cand = Path(base) / rel
+            if cand.is_file():
+                return str(cand)
+    return ""
+
+
+def office_available() -> str:
+    """本机能不能转 .doc/.ppt：先 LibreOffice，再 Windows 上的 Office。返回一句说明。"""
+    soffice = find_soffice()
+    if soffice:
+        return f"LibreOffice：{soffice}"
+    if os.name == "nt":
+        import winreg
+        for exe in ("winword.exe", "powerpnt.exe"):
+            key = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, key) as k:
+                        p = winreg.QueryValue(k, "")
+                    if p and Path(p).is_file():
+                        return f"Office：{p}"
+                except OSError:
+                    continue
+    return ""
+
+
+def _office_pids(image: str) -> set[int]:
+    """当前 WINWORD/POWERPNT 进程号（只用来判断「用户是不是开着」和清理自己起的）。"""
+    try:
+        r = run_tool(["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                     timeout=20)
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[int] = set()
+    for line in (r.stdout or "").splitlines():
+        parts = [x.strip('"') for x in line.split('","')]
+        if len(parts) >= 2 and parts[1].isdigit():
+            out.add(int(parts[1]))
+    return out
+
+
+def _kill_pids(pids: set[int]) -> None:
+    for pid in pids:
+        try:
+            run_tool(["taskkill", "/PID", str(pid), "/F"], timeout=20)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _office_convert(p: Path, target: str) -> Path:
+    """把 .doc/.ppt 另存成 .docx/.pptx，返回临时文件（调用方负责删它的目录）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="studybot-office-"))
+    dst = tmp / (p.stem + target)
+    try:
+        soffice = find_soffice()
+        if soffice:
+            fmt = target.lstrip(".")
+            try:
+                r = run_tool([soffice, "--headless", "--norestore", "--convert-to", fmt,
+                              "--outdir", str(tmp), str(p)], timeout=OFFICE_TIMEOUT)
+            except subprocess.TimeoutExpired as e:
+                raise MissingTool("办公软件", "LibreOffice 转换超时（文档可能有密码/弹窗）") from e
+            if dst.is_file():
+                return dst
+            raise RuntimeError(f"LibreOffice 没转出来：{(r.stderr or r.stdout or '')[:200]}")
+        if os.name != "nt":
+            raise MissingTool("办公软件", "读 .doc/.ppt 需要 LibreOffice（Linux/macOS 请先安装）")
+
+        kind = "doc" if target == ".docx" else "ppt"
+        image = "WINWORD.EXE" if kind == "doc" else "POWERPNT.EXE"
+        before = _office_pids(image)
+        if before:
+            name = "Word" if kind == "doc" else "PowerPoint"
+            raise MissingTool(
+                "Office 正在运行",
+                f"先关掉 {name} 再处理 .doc/.ppt（不关的话可能把你正在编辑的文档一起关掉）")
+        script = tmp / "conv.ps1"
+        script.write_text(_PS_CONV, encoding="utf-8")
+        try:
+            r = run_tool(["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+                          "-File", str(script), "-Src", str(p), "-Dst", str(dst),
+                          "-Kind", kind], timeout=OFFICE_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            _kill_pids(_office_pids(image) - before)
+            raise MissingTool("办公软件", "Word/PowerPoint 转换超时（可能有弹窗/密码）") from e
+        if dst.is_file():
+            return dst
+        _kill_pids(_office_pids(image) - before)
+        msg = ((r.stderr or "") + (r.stdout or "")).strip().replace("\r", " ")
+        raise RuntimeError(f"Office 转换失败：{msg[:200] or '没有输出'}")
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def doc_text(p: Path, tools: dict | None = None) -> str:
+    """.doc（Word 97-2003）→ docx → 文本。"""
+    f = _office_convert(p, ".docx")
+    try:
+        return docx_text(f)
+    finally:
+        shutil.rmtree(f.parent, ignore_errors=True)
+
+
+def ppt_text(p: Path, tools: dict | None = None) -> str:
+    """.ppt（PowerPoint 97-2003）→ pptx → 文本。"""
+    f = _office_convert(p, ".pptx")
+    try:
+        return pptx_text(f)
+    finally:
+        shutil.rmtree(f.parent, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ 图片 / 音视频
@@ -108,7 +418,7 @@ AUDIO_EXT = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus"}
 def kind_of(p: Path) -> str:
     """text / image / video / audio / other。"""
     ext = p.suffix.lower()
-    if ext in (".pptx", ".docx", ".pdf", ".md", ".txt"):
+    if ext in TEXT_EXT:
         return "text"
     if ext in IMAGE_EXT:
         return "image"
@@ -254,7 +564,7 @@ def extract_any(p: Path, tools: dict | None = None, on_progress=None) -> tuple[s
     t = tools or {}
     kind = kind_of(p)
     if kind == "text":
-        return extract_one(p), kind
+        return extract_one(p, t, on_progress), kind
     if kind == "image":
         return image_text(p, t.get("tesseract", ""), t.get("tessdata", "")), kind
     if kind in ("video", "audio"):
@@ -264,14 +574,18 @@ def extract_any(p: Path, tools: dict | None = None, on_progress=None) -> tuple[s
     raise MissingTool("文件类型", f"{p.suffix} 目前不支持（支持 PDF/PPTX/DOCX/MD/TXT/图片/音视频）")
 
 
-def extract_one(p: Path) -> str:
+def extract_one(p: Path, tools: dict | None = None, on_progress=None) -> str:
     ext = p.suffix.lower()
     if ext == ".pptx":
         return pptx_text(p)
     if ext == ".docx":
         return docx_text(p)
     if ext == ".pdf":
-        return pdf_text(p)
+        return pdf_text(p, tools, on_progress)
+    if ext == ".doc":
+        return doc_text(p, tools)
+    if ext == ".ppt":
+        return ppt_text(p, tools)
     if ext in (".md", ".txt"):
         return clean(p.read_text(encoding="utf-8", errors="replace"))
     raise ValueError(f"unsupported {ext}")
@@ -320,7 +634,7 @@ def main() -> None:
             continue
         rel = p.relative_to(src)
         ext = p.suffix.lower()
-        if ext not in (".pptx", ".docx", ".pdf", ".md", ".txt"):
+        if ext not in TEXT_EXT:
             skipped.append(str(rel))
             continue
 

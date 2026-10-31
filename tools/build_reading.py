@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""为每个目标从 extracted/ 里检索相关段落，生成 web/data/reading.json。
+"""切块 + 分词：检索层（`tools/retrieval.py`）和知识库共用这一套口径。
 
 不是模型总结，是关键词检索 + 出处引用：宁可少而准，也不要编。
 - 过滤 PDF 字体编码坏掉的乱码块（汉字占比过低）
 - 长章节按 ~700 字切窗，锚点取「p.N / slide N / markdown 标题」
 - 打分：标题词权重 2、checkpoint 词权重 1，再乘 IDF；标题词一个都没命中就打折
 
-用法：python tools/build_reading.py
+（以前还负责生成 web/data/reading.json 给旧 PWA 用；那条线已删，现在只留 load_blocks / terms_of。）
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-OUT = BASE / "web" / "data" / "reading.json"
 
 try:                          # 抽好的文本在数据目录里，不跟着代码走
     import paths  # type: ignore
@@ -30,6 +28,7 @@ except Exception:             # noqa: BLE001 独立跑工具时退回老路径
 CJK = re.compile(r"[\u4e00-\u9fff]")
 CJK_RUN = re.compile(r"[\u4e00-\u9fff]{2,}")
 LATIN = re.compile(r"[A-Za-z][A-Za-z0-9]{2,}")
+LATIN_CHARS = re.compile(r"[A-Za-z]")
 ANCHOR = re.compile(r"^##\s*(p\.\d+|Slide\s*\d+)\s*$")
 HEAD = re.compile(r"^#{1,4}\s*(\S.*)$")
 
@@ -53,26 +52,6 @@ CHAPTER_FILES = {
     "树": ["Trees", "4 树", "树 详解"],
     "应试": ["试卷", "复习提纲", "常考12题", "查缺补漏", "内容回忆"],
 }
-
-# 手写导读：只给有题库的前 6 个目标，其余留空由 checkpoints 兜底
-LEADS = {
-    "g01": "先把「怎么存」和「能做什么」分开。ADT 只约定操作和语义，实现方式留给你换——换实现时代价会变，但接口不变。",
-    "g02": "递归的难点不是写出来，是算复杂度。会画递归树、会展开递归式，后面所有分治算法都省一半力气。",
-    "g03": "O / Ω / Θ 不是「大概多快」，是三句话的数学定义。考试要你写出 c 和 n₀，写不出就等于没证。",
-    "g04": "增长率排序是送分题，但「为什么 log n 比 √n 慢」要能说出理由：任何正幂次最终都会超过对数。",
-    "g05": "给一段代码，先数最内层语句执行几次，再决定取最好、最坏还是平均——三个答案都可能对，看题目问哪个。",
-    "g06": "主定理不用背公式，只要会做一件事：把 f(n) 和 n^(log_b a) 比大小，谁大听谁的。",
-}
-
-POINTS = {
-    "g01": ["ADT = 数据 + 操作 + 语义，不含实现", "同一 ADT 可以有多种实现，代价不同", "先定接口，实现可替换，程序才改得动"],
-    "g02": ["递归式写成 T(n) = aT(n/b) + f(n)", "递归树：每层代价 × 层数", "Hanoi 是 2ⁿ−1，指数级"],
-    "g03": ["O 是上界，Ω 是下界，Θ 是两者都成立", "证明要给出具体的 c 和 n₀", "低阶项和常数在渐近分析里丢掉"],
-    "g04": ["n! > 2ⁿ > n³ > n² > n log n > n > √n > log n", "n^ε 最终超过 log n（ε > 0）", "化简时只留最高阶"],
-    "g05": ["嵌套循环先看内层执行次数", "最坏/平均差别在输入分布假设", "平均情况要先说清「等概率」假设"],
-    "g06": ["比较 f(n) 与 n^(log_b a)", "f 小 → Θ(n^(log_b a))", "相等 → 多乘一个 log n"],
-}
-
 
 # 有题库的目标给一组更精确的检索词（其他目标靠标题+checkpoint 自动出词）
 CURATED = {
@@ -112,6 +91,9 @@ def load_blocks() -> list[dict]:
         # 旧版本让位后改名成 *.old.txt：留着能翻回来，但不进检索
         if p.name.endswith(".old.txt"):
             continue
+        # 音视频的分段转写（.media/0000.txt）是中间产物，别当资料块
+        if ".media" in p.parts:
+            continue
         try:
             raw = p.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -149,7 +131,11 @@ def load_blocks() -> list[dict]:
     seen_text: set[str] = set()
     for b in blocks:
         t = re.sub(r"\s+", "", b["text"])
-        if not (80 <= len(t) <= 900) or cjk_ratio(t) < 0.25:
+        cjk = cjk_ratio(t)
+        latin = len(LATIN_CHARS.findall(t)) / max(1, len(t))
+        # 中文块照旧；英文/中英混排的块也收（以前只收中文占比 ≥25%，
+        # 导致英文讲义和视频转写整份进不了检索）
+        if not (80 <= len(t) <= 900) or (cjk < 0.25 and latin < 0.5):
             continue
         # 同一段话在 PPT 和教材里各有一份（或同一份资料重复入库）：只留一份，
         # 否则检索会把两份几乎一样的段落都塞给模型。
@@ -169,7 +155,7 @@ def _terms(text: str) -> set[str]:
             if bg not in STOP:
                 terms.add(bg)
     for w in LATIN.findall(text):
-        terms.add(w)
+        terms.add(w.lower())          # 英文大小写不敏感（Heap / heap 同一个词）
     return terms
 
 
@@ -252,35 +238,3 @@ def pick(goal: dict, blocks: list[dict], df: dict, n_blocks: int, keys: list[str
     return picked
 
 
-def main() -> None:
-    data = json.loads((BASE / "data" / "goals.json").read_text(encoding="utf-8-sig"))
-    blocks = load_blocks()
-
-    df: dict[str, int] = {}
-    for b in blocks:
-        for t in _terms(b["text"]):
-            df[t] = df.get(t, 0) + 1
-
-    out = {}
-    for g in data["goals"]:
-        keys = CHAPTER_FILES.get(g["ch"], [])
-        out[g["id"]] = {
-            "lead": LEADS.get(g["id"], ""),
-            "points": POINTS.get(g["id"], g.get("cp", [])),
-            "chapter": g["ch"],
-            "excerpts": pick(g, blocks, df, len(blocks), keys),
-        }
-
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-
-    n_ok = sum(1 for v in out.values() if v["excerpts"])
-    print(f"块 {len(blocks)} 个 -> {OUT}")
-    print(f"有出处的目标 {n_ok}/{len(out)}")
-    for gid in list(out)[:6]:
-        e = out[gid]["excerpts"]
-        print(f"  {gid}: {len(e)} 段", (e[0]['src'][:30] + ' · ' + e[0]['anchor']) if e else "-")
-
-
-if __name__ == "__main__":
-    main()

@@ -46,10 +46,10 @@ def choose_data_dir(default: Path) -> Path:
 
 
 def seed_quiz(db) -> int:
-    """第一次运行：把 web/data/quiz.json 里现成的 6 套题导进题库，免得一上来没题。"""
+    """第一次运行：把 tests/fixtures/seed_quiz.json 里的现成题导进题库，免得一上来没题。"""
     if db.quiz_count() > 0:
         return 0
-    p = paths.CODE_ROOT / "web" / "data" / "quiz.json"
+    p = paths.CODE_ROOT / "tests" / "fixtures" / "seed_quiz.json"
     if not p.exists():
         return 0
     try:
@@ -135,6 +135,14 @@ def main() -> int:
     d.backup_before_upgrade()       # 结构要升级就先备一份，迁移出问题能回退
     d.init()
     d.log("软件启动", "info")
+    # 老布局（extracted/inbox、extracted/书…）→ 待拆/<课>/：只挪 txt，不动原件
+    try:
+        import engine as _eng
+        moved = _eng.migrate_pending_layout(d)
+        if moved:
+            d.log(f"待拆整理：{moved} 份文本挪进「待拆」", "info")
+    except Exception as e:  # noqa: BLE001
+        d.log(f"待拆整理失败：{type(e).__name__}: {e}", "warn")
     try:
         d.auto_backup()             # 每天第一次启动备一份，升级/误删都能回退
         if not d.goals():
@@ -158,7 +166,22 @@ def main() -> int:
         d.log(f"启动排计划失败：{e}", "warn")
 
     svc = Service(d)
-    return show_app(d, svc)
+    # 手机连接服务：桌面端自己起，不用再开终端跑 server/run.py
+    local = None
+    try:
+        from localserver import LocalServer
+        local = LocalServer(d, svc)
+        if local.start():
+            d.log(f"手机连接服务已启动：{local.url}", "ok")
+        else:
+            d.log(f"手机连接服务没起来：{local.error}", "warn")
+    except Exception as e:  # noqa: BLE001  起不来只影响手机，别挡桌面
+        d.log(f"手机连接服务没起来：{type(e).__name__}: {e}", "warn")
+    try:
+        return show_app(d, svc, local)
+    finally:
+        if local is not None:
+            local.stop()
 
 
 def run_remote(cfg: dict) -> int:
@@ -180,9 +203,10 @@ def run_remote(cfg: dict) -> int:
     return show_app(d, RemoteService(d))
 
 
-def show_app(d, svc) -> int:
+def show_app(d, svc, local=None) -> int:
     from ui import App
     app = App(d, svc)
+    app.local_server = local            # 设置页要显示"手机连接服务"的状态
     # 调试用：py app/main.py plan → 直接打开某一页
     if len(sys.argv) > 1 and sys.argv[1] in dict(App.NAV):
         app.show(sys.argv[1])

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""服务器入口：HTTP API（+ 应急时的 Telegram bot、定时推送），一个进程。
+"""服务器入口（VPS / 无桌面时用）：HTTP API + 应急 Telegram bot，一个进程。
 
     python server/run.py --port 8787 --bind 0.0.0.0
 
-默认**不跑 bot、不推送**（手机版 P0 起摘掉 Telegram，方案 §12 批一）；
-要临时用回 Telegram，加 `--bot` 应急，推送窗口 07:00 / 21:30 也会一起恢复。
+⚠️ **本机日常用不用它**：桌面软件的启动流程自己会起同一个服务
+（`app/localserver.py`，端口 8787），手机同 WiFi 直接连。
+这个脚本留给 VPS 部署 / 无头运行；两边是同一段代码。
 
-首次启动会在 data/server.json 里生成一个 token，桌面端要填同一个。
+默认**不跑 bot、不推送**（手机版 P0 起摘掉 Telegram）；要应急加 `--bot`。
+首次启动会在数据目录的 server.json 里生成 token，桌面端和手机填同一个。
 """
 from __future__ import annotations
 
 import argparse
-import json
-import secrets
 import sys
 import threading
 import time
@@ -23,23 +23,10 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "app"))
 sys.path.insert(0, str(BASE / "tools"))
 
-import api                      # noqa: E402
 import db as dbmod              # noqa: E402
 import paths                    # noqa: E402
+from localserver import LocalServer  # noqa: E402
 from service import Service     # noqa: E402
-
-
-def load_token(path: Path) -> str:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8")).get("token", "")
-        except ValueError:
-            pass
-    token = secrets.token_urlsafe(24)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"token": token}, ensure_ascii=False), encoding="utf-8")
-    print(f"已生成新的访问 token（写进 {path}）：\n  {token}", flush=True)
-    return token
 
 
 def bot_keeper(svc: Service, stop: threading.Event) -> None:
@@ -80,28 +67,31 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             d.log(f"导入目标失败：{e}", "warn")
 
-    token = load_token(paths.server_config())
     svc = Service(d, push=use_bot)
-    api.configure(d, svc, token)
+    local = LocalServer(d, svc, port=args.port, bind=args.bind)
+    if not local.start():
+        print(f"服务没起来：{local.error}", flush=True)
+        return 1
 
     stop = threading.Event()
     if use_bot:
         threading.Thread(target=bot_keeper, args=(svc, stop), daemon=True,
                          name="bot-keeper").start()
 
-    srv = api.serve(args.bind, args.port)
-    print(f"学习bot 服务端已启动：http://{args.bind}:{args.port}  "
-          f"db={d.path}", flush=True)
+    print(f"学习bot 服务端已启动：{local.url}  db={d.path}", flush=True)
+    print(f"token（手机/瘦客户端要填的）：{local.token}", flush=True)
     if use_bot:
         print("应急模式：Telegram bot 与 07:00/21:30 推送已开启。", flush=True)
     else:
         print("Telegram 已摘：不起 bot、不推送。需要时加 --bot。", flush=True)
     try:
-        srv.serve_forever()
+        while not stop.is_set():
+            time.sleep(3600)
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
+        local.stop()
         svc.shutdown()
     return 0
 

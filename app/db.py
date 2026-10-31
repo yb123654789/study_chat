@@ -29,8 +29,8 @@ import paths
 BASE = paths.CODE_ROOT
 TZ = timezone(timedelta(hours=8))          # 一律 Asia/Shanghai，不用本地时区
 
-SCHEMA_VERSION = 6                         # 6=手机上行事件（uid 幂等）
-                                           # 5=待确认队列 1=基础表 2=聊天 3=多课程 4=容量改成权重
+SCHEMA_VERSION = 7                         # 7=知识库索引进库（增量重建）
+                                           # 6=手机上行事件 5=待确认队列 1=基础表 2=聊天 3=多课程 4=容量改成权重
 
 
 def _data() -> Path:
@@ -225,6 +225,31 @@ CREATE TABLE IF NOT EXISTS mobile_events (
     result       TEXT DEFAULT '',
     created_at   TEXT DEFAULT ''
 );
+
+-- 知识库节点（二级数据）的**索引**：md 文件是导出物，这里才是"哪个节点、写到哪、版本多少"。
+-- 有了它，「重建」不用扫整个目录、切页不用读 2000 个文件。
+-- goal_hash = 目标字段指纹；blocks_rev = 检索块的版本；两个都没变就不重渲染。
+CREATE TABLE IF NOT EXISTS kb_nodes (
+    id          TEXT PRIMARY KEY,
+    course      TEXT DEFAULT 'ds',
+    chapter     TEXT DEFAULT '',
+    title       TEXT DEFAULT '',
+    minutes     INTEGER DEFAULT 30,
+    path        TEXT DEFAULT '',          -- 相对 <数据目录>/知识库
+    version     INTEGER DEFAULT 1,
+    goal_hash   TEXT DEFAULT '',
+    blocks_rev  TEXT DEFAULT '',
+    body_hash   TEXT DEFAULT '',
+    written_at  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_kb_ch ON kb_nodes(chapter, id);
+CREATE INDEX IF NOT EXISTS ix_kb_course ON kb_nodes(course, id);
+
+-- 知识库的全局元数据：章节顺序、树/索引的 rev（变了才重写那两个文件）
+CREATE TABLE IF NOT EXISTS kb_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT DEFAULT ''
+);
 """
 
 
@@ -346,6 +371,21 @@ class DB:
                 created_at   TEXT DEFAULT ''
             )""")
             self.log("已加「手机事件」表：重传同一条 uid 不会重复写。", "info")
+
+        # v7：知识库索引进库（增量重建）。表在 SCHEMA 里，这里补上老库，
+        # 并把已有的 md 导入成基线——否则升级后列表空着，要等下次重建才知道有哪些节点。
+        if v < 7:
+            self.x("""CREATE TABLE IF NOT EXISTS kb_nodes (
+                id TEXT PRIMARY KEY, course TEXT DEFAULT 'ds', chapter TEXT DEFAULT '',
+                title TEXT DEFAULT '', minutes INTEGER DEFAULT 30, path TEXT DEFAULT '',
+                version INTEGER DEFAULT 1, goal_hash TEXT DEFAULT '', blocks_rev TEXT DEFAULT '',
+                body_hash TEXT DEFAULT '', written_at TEXT DEFAULT '')""")
+            self.x("CREATE INDEX IF NOT EXISTS ix_kb_ch ON kb_nodes(chapter, id)")
+            self.x("CREATE INDEX IF NOT EXISTS ix_kb_course ON kb_nodes(course, id)")
+            self.x("CREATE TABLE IF NOT EXISTS kb_meta (key TEXT PRIMARY KEY, value TEXT DEFAULT '')")
+            n = self._kb_import_baseline()
+            self.log(f"已加「知识库索引」表：重建改增量，切页不再扫整个目录（导入基线 {n} 个）。",
+                     "info")
 
         if v:
             self.log(f"数据库结构升级：v{v} → v{SCHEMA_VERSION}", "ok")
@@ -734,6 +774,123 @@ class DB:
         else:
             rows = self.q("SELECT DISTINCT goal_id FROM tasks WHERE state='done'")
         return {r["goal_id"] for r in rows}
+
+    # ---------------------------------------------------------------- 知识库索引
+    @staticmethod
+    def _md_meta(text: str) -> dict:
+        """读 md 头部 --- 键值（只认 key: value）。"""
+        out: dict[str, str] = {}
+        if not text.startswith("---"):
+            return out
+        for line in text.splitlines()[1:]:
+            if line.strip() == "---":
+                break
+            if ":" in line:
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def _kb_import_baseline(self) -> int:
+        """老库升级时：把已有的知识库 md 导入 kb_nodes（只导一次）。
+
+        goal_hash / blocks_rev 留空是有意的——下次重建会让这些节点重写一遍，
+        内容还是从资料重新摘的，不会留下错版本。
+        """
+        if self.q1("SELECT 1 FROM kb_nodes LIMIT 1"):
+            return 0
+        base = paths.knowledge_dir()
+        if not base.exists():
+            return 0
+        order: list[str] = []
+        n = 0
+        for p in sorted(base.rglob("*.md")):
+            if p.name == "_索引.md" or ".history" in p.parts:
+                continue
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")[:600]
+            except OSError:
+                continue
+            meta = self._md_meta(head)
+            gid = meta.get("id") or p.stem
+            try:
+                ver = int(meta.get("version") or 1)
+            except ValueError:
+                ver = 1
+            ch = meta.get("chapter") or "未分章"
+            self.kb_save_node(gid, course=meta.get("course") or "ds", chapter=ch,
+                              title=meta.get("title") or p.stem,
+                              minutes=int(meta.get("minutes") or 30) if
+                              str(meta.get("minutes") or "").isdigit() else 30,
+                              path=str(p.relative_to(base)).replace("\\", "/"),
+                              version=ver, body_hash=hashlib.sha1(p.read_bytes()).hexdigest())
+            if ch not in order:
+                order.append(ch)
+            n += 1
+        if order:
+            self.kb_set_meta("chapter_order", json.dumps(order, ensure_ascii=False))
+        return n
+
+    def kb_node(self, gid: str) -> dict | None:
+        return self.q1("SELECT * FROM kb_nodes WHERE id=?", (gid,))
+
+    def kb_nodes(self, chapter: str | None = None, course: str | None = None) -> list[dict]:
+        sql = "SELECT * FROM kb_nodes"
+        args: list = []
+        where = []
+        if chapter is not None:
+            where.append("chapter=?")
+            args.append(chapter)
+        if course:
+            where.append("course=?")
+            args.append(course)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY chapter, course, id"
+        return self.q(sql, args)
+
+    def kb_chapters(self) -> list[dict]:
+        """[{chapter, n}]，给知识库页先列章用（不拉节点）。"""
+        return self.q("SELECT chapter, COUNT(*) AS n FROM kb_nodes GROUP BY chapter "
+                      "ORDER BY chapter")
+
+    def kb_count(self, course: str | None = None) -> int:
+        if course:
+            r = self.q1("SELECT COUNT(*) AS n FROM kb_nodes WHERE course=?", (course,))
+        else:
+            r = self.q1("SELECT COUNT(*) AS n FROM kb_nodes")
+        return int((r or {}).get("n") or 0)
+
+    def kb_save_node(self, gid: str, **f) -> None:
+        self.x(
+            "INSERT INTO kb_nodes(id,course,chapter,title,minutes,path,version,goal_hash,"
+            "blocks_rev,body_hash,written_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET course=excluded.course, chapter=excluded.chapter, "
+            "title=excluded.title, minutes=excluded.minutes, path=excluded.path, "
+            "version=excluded.version, goal_hash=excluded.goal_hash, "
+            "blocks_rev=excluded.blocks_rev, body_hash=excluded.body_hash, "
+            "written_at=excluded.written_at",
+            (gid, f.get("course", "ds"), f.get("chapter", ""), f.get("title", ""),
+             int(f.get("minutes") or 30), f.get("path", ""), int(f.get("version") or 1),
+             f.get("goal_hash", ""), f.get("blocks_rev", ""), f.get("body_hash", ""),
+             f.get("written_at") or now_s()))
+
+    def kb_delete_nodes(self, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        n = 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            self.x(f"DELETE FROM kb_nodes WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+            n += len(chunk)
+        return n
+
+    def kb_meta(self, key: str, default: str = "") -> str:
+        r = self.q1("SELECT value FROM kb_meta WHERE key=?", (key,))
+        return str(r["value"]) if r else default
+
+    def kb_set_meta(self, key: str, value: str) -> None:
+        self.x("INSERT INTO kb_meta(key,value) VALUES(?,?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     # ---------------------------------------------------------------- 任务
     def tasks_between(self, date_from: str, date_to: str,

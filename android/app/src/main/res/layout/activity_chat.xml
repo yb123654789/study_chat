@@ -25,7 +25,7 @@
         android:textColor="@color/muted"
         android:textSize="11sp" />
 
-    <!-- P6 语音：一行放状态 + 模式（免手/手动）+ 朗读开关 -->
+    <!-- 语音：状态 + 插嘴开关 + 朗读开关（麦克风常开，不用反复点） -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -41,7 +41,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="空闲"
+            android:text="语音关着"
             android:textColor="@color/muted"
             android:textSize="11sp" />
 
@@ -56,7 +56,7 @@
             android:minWidth="0dp"
             android:paddingStart="8dp"
             android:paddingEnd="8dp"
-            android:text="免手"
+            android:text="插嘴开"
             android:textSize="11sp" />
 
         <com.google.android.material.button.MaterialButton

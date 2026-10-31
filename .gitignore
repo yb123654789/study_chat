@@ -28,6 +28,9 @@ data/_shot/
 data/backups/
 data/exports/
 
+# 测试集造的演示数据目录（fixtures 要留，跑出来的不留）
+tests/demo/
+
 # 打包产物（spec 要留，工作目录和 exe 不留）
 dist/
 build/*/
@@ -43,6 +46,13 @@ android/keystore/
 
 # 外部工具二进制（各自机器装，别进库）
 tools/bin/
+
+# 手机端语音：AAR 与 228MB 模型各自本地下载，别进库
+android/app/libs/
+android/app/src/main/assets/sensevoice/*.onnx
+
+# 临时目录（模型下载、构建日志）
+.tmp/
 
 # 系统杂项
 .DS_Store

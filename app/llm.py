@@ -55,11 +55,13 @@ def _post(payload: dict, key: str, timeout: int = 90) -> dict:
 
 def chat_with_tools(messages: list[dict], tools: list[dict] | None = None, db=None,
                     max_tokens: int = 800, temperature: float = 0.7,
-                    timeout: int = 90) -> dict:
+                    timeout: int = 90, extra: dict | None = None) -> dict:
     """调一次模型，把文本、工具调用和 token 用量一起拿回来。
 
     返回 {"text", "tool_calls", "finish", "tokens", "usage", "model"}。
     出题 / 批改 / 带练都走这里，带练额外传 tools 让模型能主动发起小测。
+    extra：额外请求字段（例如 {"thinking": {"type": "disabled"}}，
+    让 deepseek-flash 别把输出预算全用在推理上）。
     """
     key = api_key(db)
     if not key:
@@ -70,6 +72,8 @@ def chat_with_tools(messages: list[dict], tools: list[dict] | None = None, db=No
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if extra:
+        payload.update(extra)
     data = _post(payload, key, timeout)
     try:
         choice = data["choices"][0]
@@ -88,9 +92,10 @@ def chat_with_tools(messages: list[dict], tools: list[dict] | None = None, db=No
 
 
 def chat(messages: list[dict], db=None, max_tokens: int = 800,
-         temperature: float = 0.7, timeout: int = 90) -> str:
+         temperature: float = 0.7, timeout: int = 90,
+         extra: dict | None = None) -> str:
     r = chat_with_tools(messages, None, db=db, max_tokens=max_tokens,
-                        temperature=temperature, timeout=timeout)
+                        temperature=temperature, timeout=timeout, extra=extra)
     if not r["text"]:
         raise LLMError("模型返回空")
     return r["text"]

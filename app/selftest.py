@@ -29,7 +29,7 @@ import llm                    # noqa: E402
 import paths                  # noqa: E402
 import planner                # noqa: E402
 
-REPO_GOALS = BASE / "data" / "goals.json"      # 读真实的 goals，但不碰真实数据目录
+REPO_GOALS = BASE / "tests" / "fixtures" / "mini_goals.json"   # 测试集，不读真实数据
 
 OK, BAD = "  ✓", "  ✗"
 fails: list[str] = []
@@ -61,7 +61,8 @@ QUIZ_JSON = json.dumps({"questions": [
 ]}, ensure_ascii=False)
 
 
-def fake_chat(messages, db=None, max_tokens=800, temperature=0.7, timeout=90):
+def fake_chat(messages, db=None, max_tokens=800, temperature=0.7, timeout=90,
+              extra=None):
     sys_prompt = messages[0]["content"]
     if "出题人" in sys_prompt:
         return QUIZ_JSON
@@ -102,7 +103,7 @@ def run() -> int:
 
     # 1. 导入目标
     n = d.import_goals(REPO_GOALS)
-    check("导入目标", n > 40, f"只导入 {n} 个")
+    check("导入目标", n >= 30, f"只导入 {n} 个")
     check("考核日", d.get("exam_date") == "2027-01-04", d.get("exam_date"))
 
     # 2. 排计划
@@ -382,13 +383,13 @@ def run() -> int:
 
     # 11. 统计
     s = d.stats()
-    check("统计有数", s["total_goals"] > 40 and s["days_left"] > 0, str(s))
+    check("统计有数", s["total_goals"] >= 30 and s["days_left"] > 0, str(s))
     check("今日计数", s["today_total"] >= 1, str(s["today_total"]))
 
     # 14. 落后 → 自动重排（欠的卡并回队列，牺牲写进日志和当天推送）
     from datetime import date as _date, timedelta as _td
     yday = (_date.fromisoformat(dbmod.today_s()) - _td(days=1)).isoformat()
-    engine.add_task(d, yday, "g01", "欠下的卡", "learn", 40)
+    engine.add_task(d, yday, "t01", "欠下的卡", "learn", 40)
     check("造出落后", chatmod.lag_days(d) >= 1, str(chatmod.lag_days(d)))
     r14 = engine.auto_replan(d)
     check("落后触发自动重排", bool(r14) and r14["lag"] >= 1, str(r14))
@@ -402,7 +403,7 @@ def run() -> int:
           str([e.get("text") for e in d.logs(5)]))
 
     # 15. 错题回炉：没过 → 明天重做；连续两次 → 停止换题，改回炉
-    gt = "g06"
+    gt = "t06"
     d.x("DELETE FROM attempts WHERE goal_id=?", (gt,))
     d.x("DELETE FROM tasks WHERE goal_id=? AND date>?", (gt, dbmod.today_s()))
 
@@ -442,10 +443,10 @@ def run() -> int:
     math_goals.write_text(json.dumps({
         "subject": "高等数学", "exam_date": "2026-12-20",
         "goals": [
-            {"id": "g01", "ch": "极限", "title": "极限的定义与 ε-δ 写法", "p": "core",
+            {"id": "t01", "ch": "极限", "title": "极限的定义与 ε-δ 写法", "p": "core",
              "m": 30, "d": [], "cp": ["能写出 ε-δ 定义"]},
-            {"id": "g02", "ch": "导数", "title": "导数定义与求导法则", "p": "core",
-             "m": 25, "d": ["g01"], "cp": ["会求导"]},
+            {"id": "t02", "ch": "导数", "title": "导数定义与求导法则", "p": "core",
+             "m": 25, "d": ["t01"], "cp": ["会求导"]},
         ]}, ensure_ascii=False), encoding="utf-8")
     d.save_course("math", name="高等数学", exam_date="2026-12-20",
                   weekend_ratio=150, day_cap=0)
@@ -458,7 +459,7 @@ def run() -> int:
     check("新课程导入目标", n17 == 2, str(n17))
     mg = [g["id"] for g in d.goals(course="math")]
     check("撞车的 id 自动改名", len(mg) == 2 and all(x.startswith("math-") for x in mg), str(mg))
-    check("原课程目标没被覆盖", d.goal("g01")["course"] == "ds", d.goal("g01")["course"])
+    check("原课程目标没被覆盖", d.goal("t01")["course"] == "ds", d.goal("t01")["course"])
     r17 = engine.regenerate(d, course="math")
     check("新课程单独排了计划", r17["inserted"] >= 2, str(r17["inserted"]))
     mt = d.tasks_between("0000-01-01", "9999-12-31", course="math")
@@ -474,7 +475,7 @@ def run() -> int:
 
     # 18. 落后按课程各算各的
     d.set("auto_replan_day", "")
-    engine.add_task(d, yday, "math-g02", "欠的数学卡", "review", 15)
+    engine.add_task(d, yday, "math-t02", "欠的数学卡", "review", 15)
     check("数学落后独立计数", d.lag_days("math") >= 1, str(d.lag_days("math")))
     check("数据结构不受影响", d.lag_days("ds") == 0, str(d.lag_days("ds")))
     r18 = engine.auto_replan(d)
@@ -530,9 +531,9 @@ def run() -> int:
     check("清空后日志还能继续记", any("清空后还能写" in (e["text"] or "") for e in d.logs(10)),
           str([e["text"] for e in d.logs(3)]))
 
-    # 21. 资料 → 目标：程序自己把新入库的资料拆成目标并重排（不再由人在外面写 goals.json）
+    # 21. 资料 → 目标：待拆文件夹里的 txt 交给模型拆成目标并重排
     d.add_material("materials/inbox/补料.pdf", "hash-test", 1234, "ready")
-    ext = paths.extracted_dir("ds") / "inbox"
+    ext = paths.pending_dir("ds")
     ext.mkdir(parents=True, exist_ok=True)
     (ext / "补料.txt").write_text("二分查找：定义、循环不变量、边界条件。", encoding="utf-8")
     g_before = len(d.goals(course="ds"))
@@ -546,6 +547,9 @@ def run() -> int:
                   for x in json.loads(paths.goals_file("ds").read_text(encoding="utf-8"))["goals"]),
           str(r21["titles"]))
     check("拆完自动重排了计划", bool(d.get("plan_generated_at", "")), d.get("plan_generated_at"))
+    check("拆完把 txt 从待拆挪到已拆",
+          not engine.pending_files("ds") and (paths.done_dir("ds") / "补料.txt").is_file(),
+          str([p.name for p in engine.pending_files("ds")]))
     r21b = engine.derive_goals(d, course="ds")
     check("没有新资料就不再拆（不重复花钱）", r21b["added"] == 0, str(r21b["note"])[:60])
 
@@ -566,12 +570,96 @@ def run() -> int:
               for i in engine._manifest_read()["items"]), str(engine._manifest_read())[:80])
     kb22 = engine.write_knowledge(d, course="math")
     check("知识库写出 Markdown", kb22["written"] >= 2, str(kb22))
-    mds = [p for p in paths.knowledge_dir("math").rglob("*.md") if p.name != "_索引.md"]
+    kbroot = paths.knowledge_dir()
+    mds = [p for p in kbroot.rglob("*.md") if p.name != "_索引.md"]
     check("每个目标一个 md 且带版本号",
-          len(mds) >= 2 and all("version:" in p.read_text(encoding="utf-8")[:300] for p in mds),
+          len(mds) >= 2 and all("version:" in p.read_text(encoding="utf-8")[:600] for p in mds),
           str(len(mds)))
+    check("知识库不分科目：只有一个根，没有 知识库/math 子目录",
+          paths.knowledge_dir("math") == kbroot and not (kbroot / "math").exists()
+          and not (kbroot / "ds").exists(), str(kbroot))
+    check("front matter 带 course / deps / parent（知识树的字段）",
+          all(all(k in p.read_text(encoding="utf-8")[:600]
+                  for k in ("course: math", "deps:", "parent:")) for p in mds
+              if "course: math" in p.read_text(encoding="utf-8")[:600]),
+          "有人缺字段")
+    tree22 = json.loads((kbroot / "_树.json").read_text(encoding="utf-8"))
+    check("_树.json 有节点、边和掌握度字段",
+          len(tree22["nodes"]) >= 2 and tree22["stats"]["nodes"] == len(tree22["nodes"])
+          and all("done" in n and "attempts" in n and "course" in n for n in tree22["nodes"]),
+          str(tree22["stats"]))
+    check("_索引.md 是全局一份（章节 → 目标，标科目）",
+          (kbroot / "_索引.md").exists() and "门课" in (kbroot / "_索引.md").read_text(encoding="utf-8"),
+          "")
     kb22b = engine.write_knowledge(d, course="math")
     check("知识库没变就不重写", kb22b["written"] == 0, str(kb22b))
+
+    # 22.1 章改名：节点搬家而不是留孤儿，版本接着涨，旧版进 .history
+    def kb_file_of(gid: str):
+        for p in kbroot.rglob(f"{gid}-*.md"):
+            if ".history" in p.parts:
+                continue
+            if engine._front_matter(p.read_text(encoding="utf-8")).get("id") == gid:
+                return p
+        return None
+
+    g_move = d.goals(course="math")[0]
+    old_file = kb_file_of(g_move["id"])
+    old_ver = int(engine._front_matter(old_file.read_text(encoding="utf-8")).get("version") or 1)
+    d.x("UPDATE goals SET ch=? WHERE id=?", ("改过的章名", g_move["id"]))
+    engine.write_knowledge(d, course="math")
+    new_files = [p for p in kbroot.rglob(f"{g_move['id']}-*.md")
+                 if ".history" not in p.parts
+                 and engine._front_matter(p.read_text(encoding="utf-8")).get("id") == g_move["id"]]
+    new_ver = int(engine._front_matter(new_files[0].read_text(encoding="utf-8")).get("version") or 1)
+    check("章改名：节点搬到新章，不留两个文件",
+          len(new_files) == 1 and new_files[0].parent.name == "改过的章名", str(new_files))
+    check("章改名：版本接着涨，旧版进了 .history",
+          new_ver == old_ver + 1 and any(p.name == old_file.name
+                                         for p in (kbroot / ".history").rglob("*.md")),
+          f"{old_ver}→{new_ver}")
+
+    # 22.2 增量：什么都没变时 0 次写文件（表里记着指纹，不重渲染不重读原文）
+    kbzero = engine.write_knowledge(d, course="math")
+    check("没变化就跳过：written=0 且 skipped 记了数",
+          kbzero["written"] == 0 and kbzero["skipped"] >= 2, str(kbzero))
+
+    # 22.3 孤儿：目标没了 → 索引里的节点和文件一起清（文件进 .history，不硬删）
+    victim = d.goals(course="math")[0]
+    vfile = kb_file_of(victim["id"])
+    d.x("DELETE FROM goals WHERE id=?", (victim["id"],))
+    kb22c = engine.write_knowledge(d, course="math")
+    check("目标没了 → 文件进 .history、索引里也删了",
+          kb22c["orphaned"] >= 1 and not vfile.exists()
+          and d.kb_node(victim["id"]) is None
+          and any(p.name == vfile.name for p in (kbroot / ".history").rglob("*.md")), str(kb22c))
+
+    # 22.4 手写文件（不在索引里）：重建不碰、列表也不显示
+    stray = kbroot / "未分章" / "zz99-手写的.md"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("手写的，没有 front matter\n", encoding="utf-8")
+    kb22d = engine.write_knowledge(d, course="math")
+    check("手写文件不在索引里：重建不碰、列表不显示",
+          stray.exists() and kb22d["orphaned"] == 0
+          and all("zz99" not in r["id"] for r in engine.knowledge_list(d)), str(kb22d))
+
+    # 22.5 用户自己的笔记目录（下划线开头）不算节点，重建也不清
+    note_dir = kbroot / "_笔记"
+    note_dir.mkdir(parents=True, exist_ok=True)
+    (note_dir / "自己写的.md").write_text("# 自己写的\n随便写。", encoding="utf-8")
+    kb22e = engine.write_knowledge(d, course="math")
+    check("_笔记/ 不算节点、重建也不清",
+          all("自己写的" not in r["title"] for r in engine.knowledge_list(d))
+          and (note_dir / "自己写的.md").exists() and kb22e["orphaned"] == 0, str(kb22e))
+
+    # 22.6 老库升级到 v7：从磁盘 md 导入基线，列表立刻能看（不用等重建）
+    d.x("DROP TABLE kb_nodes")
+    d.x("DROP TABLE kb_meta")
+    d.set("schema_version", "6")
+    d.init()
+    check("v7 迁移：从现有 md 导入基线",
+          d.schema_version == dbmod.SCHEMA_VERSION and d.kb_count() >= 1
+          and bool(d.kb_meta("chapter_order")), f"v={d.schema_version} n={d.kb_count()}")
 
     # 23. 处理资料：逐份进度 / 断点续跑 / 取消
     events: list[dict] = []
@@ -591,9 +679,9 @@ def run() -> int:
     check("点取消后不再开始新文件", r23c["done"] == 0 and r23c["cancelled"], str(r23c))
 
     # 24. 知识库浏览 + 手动清空回收站
-    kl = engine.knowledge_list("math")
+    kl = engine.knowledge_list(d, "math")
     check("知识库能列出章节和目标",
-          len(kl) >= 2 and all(r.get("chapter") for r in kl), str(kl[:2]))
+          len(kl) >= 1 and all(r.get("chapter") for r in kl), str(kl[:2]))
     body = engine.knowledge_read(kl[0]["path"])
     check("知识库正文去掉了 front matter",
           "要掌握" in body and not body.startswith("---"), body[:40])
@@ -612,15 +700,15 @@ def run() -> int:
     d.set("api_key", "sk-test-p0")
     check("填回 key 提示消失", llm.key_hint(d) == "", llm.key_hint(d))
 
-    # 25.2 老库 v4 → v5：先热备，再建出 review_queue
+    # 25.2 老库 v4 → 最新：先热备，再建出 review_queue
     d.set("schema_version", "4")
     d.x("DROP TABLE IF EXISTS review_queue")
     bp25 = d.backup_before_upgrade()
-    check("迁移前自动热备（v5）", bp25 is not None and bp25.exists(), str(bp25))
+    check("迁移前自动热备（v4→最新）", bp25 is not None and bp25.exists(), str(bp25))
     d.init()
-    check("迁移建出 review_queue 且版本到 5",
+    check("迁移建出 review_queue 且版本到最新",
           bool(d.q("SELECT name FROM sqlite_master WHERE type='table' AND name='review_queue'"))
-          and d.schema_version == dbmod.SCHEMA_VERSION == 6, str(d.schema_version))
+          and d.schema_version == dbmod.SCHEMA_VERSION, str(d.schema_version))
 
     # 25.3 待确认：进库 / 只列未处理 / 听电脑 / 保留手机
     if not d.today_tasks():

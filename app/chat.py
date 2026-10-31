@@ -139,6 +139,65 @@ def system_prompt(db, task: dict | None, goal: dict, hits: list[dict]) -> str:
 
 _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _MD_HEAD = re.compile(r"(?m)^#{1,4}\s*")
+_CJK = re.compile(r"[\u4e00-\u9fff]")
+_EN_CACHE: dict[str, list[str]] = {}
+_EN_SKIP = {"出题", "考我", "小测", "跳过", "看计划", "看进度", "继续", "你好",
+            "谢谢", "清空", "换卡", "开始"}
+
+SYSTEM_EN_TERMS = """你是检索词翻译器。把用户的中文问题变成英文检索词，用来在英文教材/讲义里做关键词匹配。
+- 只输出 JSON 数组，5–8 个词或短语，全部小写；不要句子，不要解释。
+- 同一个概念给多个常见英文说法：并查集 → disjoint set / union-find；堆 → heap / priority queue；散列 → hashing / hash table；树 → tree；图 → graph。
+- 保留算法/数据结构的标准英文名。只输出 JSON。"""
+
+
+def english_terms(db, goal: dict, text: str) -> list[str]:
+    """中文问题 → 英文检索词（设置里「英文资料也参与检索」打开时才用）。
+
+    只做检索，不改问题本身；失败/没 key/这门课没有英文块都返回空，
+    聊天照旧走中文检索。结果缓存在进程内，同一个问题不重复花钱。
+    """
+    if (db.get("en_query", "") or "") != "1":
+        return []
+    if not _CJK.search(text or ""):
+        return []                     # 问题本来就是英文，不用翻
+    if len((text or "").strip()) < 4 or (text or "").strip() in _EN_SKIP:
+        return []                     # 「好」「出题」这种不用花一次翻译钱
+    course = goal.get("course") or "ds"
+    r = engine.retrieval_mod()
+    if not r:
+        return []
+    try:
+        if not r.has_english(course):
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+    key = text.strip()[:120]
+    if key in _EN_CACHE:
+        return _EN_CACHE[key]
+    terms: list[str] = []
+    try:
+        raw = llm.chat([
+            {"role": "system", "content": SYSTEM_EN_TERMS},
+            {"role": "user", "content": text},
+        ], db=db, max_tokens=180, temperature=0, timeout=15,
+            extra={"thinking": {"type": "disabled"}})
+        obj = llm.extract_json(raw)
+        if isinstance(obj, list):
+            terms = [str(x) for x in obj]
+        elif isinstance(obj, dict):
+            terms = [str(x) for x in (obj.get("terms") or obj.get("keywords") or [])]
+    except Exception:  # noqa: BLE001 翻译失败就纯中文检索，不挡聊天
+        terms = []
+    out: list[str] = []
+    for x in terms:
+        t = re.sub(r"\s+", "", x).strip().lower()
+        if len(t) >= 3 and re.search(r"[a-z]", t) and t not in out:
+            out.append(t)
+    out = out[:8]
+    if len(_EN_CACHE) > 300:
+        _EN_CACHE.clear()
+    _EN_CACHE[key] = out
+    return out
 
 
 def plain(text: str) -> str:
@@ -172,7 +231,8 @@ def reply(db, conv: dict, text: str, handlers=None) -> dict:
         "title": (task or {}).get("title", ""), "cp": [], "ch": ""}
     if goal.get("course"):
         goal = {**goal, "course_name": (db.course(goal["course"]) or {}).get("name", "")}
-    hits = engine.retrieve(goal, text, 3)
+    extra = english_terms(db, goal, text)      # 设置里打开才会多调一次小模型
+    hits = engine.retrieve(goal, text, 3, extra_terms=extra)
 
     msgs: list[dict] = [{"role": "system", "content": system_prompt(db, task, goal, hits)}]
     for m in trim_history(db.conv_messages(int(conv["id"]), HISTORY_TURNS)):

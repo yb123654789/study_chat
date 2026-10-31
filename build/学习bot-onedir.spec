@@ -10,29 +10,55 @@
 """
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 ROOT = Path(SPECPATH).parent          # build/ 的上一级 = 项目根
 APP = ROOT / "app"
 TOOLS = ROOT / "tools"
+SERVER = ROOT / "server"
 
 HIDDEN = [
     "db", "paths", "engine", "llm", "chat", "bot", "service", "remote", "ui", "main",
     "planner", "retrieval", "build_reading", "extract",
+    "api",        # localserver 按名字延迟导入 server/api.py，静态分析看不到
 ]
 
 DATAS = []
-_quiz = ROOT / "web" / "data" / "quiz.json"
-if _quiz.exists():
-    DATAS.append((str(_quiz), "web/data"))     # 第一次运行导现成题库用
+BINARIES = []
+# pypdfium2：扫描版 PDF 渲染 + AES 加密 PDF 解密/抽字。它是二进制包，必须把
+# pdfium.dll 一起带上；extract.py 里是延迟导入，所以 hiddenimports 也要补。
+for _mod in ("pypdfium2", "pypdfium2_raw"):
+    try:
+        _d, _b, _h = collect_all(_mod)
+    except Exception:                 # 没装就跳过，打包版退化为「PDF 只能读文字层」
+        continue
+    DATAS += _d
+    BINARIES += _b
+    HIDDEN += _h
+HIDDEN += ["pypdfium2", "pypdfium2_raw"]
+# pypdf 是 PDF 抽取的唯一第三方依赖，仓库里随 tools/libs 带了一份纯 Python 的。
+# 不打包进去 → 打包版处理 PDF 会报 ModuleNotFoundError: No module named 'pypdf'
+# （2026-10-31 用户遇到的 34 份 PDF 全失败就是这个）。
+_libs = TOOLS / "libs"
+if _libs.is_dir():
+    DATAS.append((str(_libs), "libs"))
+# 兜底：tools/libs/pypdf 这份仓库自带的已经不可用（2026-10-31 发现目录被删/读不了），
+# 那就把 pip 装的那份 pypdf 当模块打进去（落在 _internal/pypdf），extract.py 照样能 import。
+HIDDEN += ["pypdf"]
+_seed = ROOT / "tests" / "fixtures" / "seed_quiz.json"
+if _seed.exists():
+    DATAS.append((str(_seed), "tests/fixtures"))   # 第一次运行导现成题库用
 
 a = Analysis(
     [str(APP / "main.py")],
-    pathex=[str(APP), str(TOOLS)],
-    binaries=[],
+    pathex=[str(APP), str(TOOLS), str(SERVER)],
+    binaries=BINARIES,
     datas=DATAS,
     hiddenimports=HIDDEN,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["unittest", "pydoc", "doctest", "tkinter.test", "sqlite3.test"],
+    excludes=["unittest", "pydoc", "doctest", "tkinter.test", "sqlite3.test",
+              "numpy"],       # pypdfium2 的 to_numpy() 会拖进 26MB numpy，桌面端用不到
     noarchive=False,
 )
 pyz = PYZ(a.pure)

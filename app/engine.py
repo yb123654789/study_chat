@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import html
 import json
 import re
@@ -49,12 +50,13 @@ def retrieval_mod():
     return _retrieval
 
 
-def retrieve(goal: dict, query: str, k: int = 3) -> list[dict]:
+def retrieve(goal: dict, query: str, k: int = 3,
+             extra_terms: list[str] | None = None) -> list[dict]:
     r = retrieval_mod()
     if not r:
         return []
     try:
-        return r.search(goal, query or goal.get("title", ""), k)
+        return r.search(goal, query or goal.get("title", ""), k, extra_terms=extra_terms)
     except Exception:  # noqa: BLE001
         return []
 
@@ -502,7 +504,7 @@ def ingest_inbox(db, progress=None, course: str | None = None) -> dict:
 
     files = inbox_files(course)
     new, skipped, failed = 0, 0, 0
-    out_dir = paths.extracted_dir(course) / "inbox"
+    out_dir = paths.pending_dir(course)
     for p in files:
         if p.suffix.lower() not in TEXT_EXT:
             skipped += 1
@@ -639,20 +641,29 @@ def _derive_user(subject: str, exam: str, existing: list[dict], text: str) -> st
 
 
 def _text_for(course: str, material_path: str) -> Path | None:
-    """材料相对路径 → 抽出来的 .txt（顺序：inbox 平铺 → 镜像目录 → 递归同名）。"""
+    """材料相对路径 → 抽出来的 .txt（待拆/已拆/inbox 都找一遍）。"""
     p = Path(str(material_path).replace("\\", "/"))
+    stem = p.stem
     base = paths.extracted_dir(course)
+    roots = (paths.pending_dir(course), paths.done_dir(course), base)
     parts = list(p.parts)
     if parts and parts[0] == "materials":
         parts = parts[1:]
     if parts and parts[0] in (course, "scut"):
         parts = parts[1:]
     mirror = (base / Path(*parts)).with_suffix(".txt") if parts else None
-    for t in (base / "inbox" / f"{p.stem}.txt", mirror, base / f"{p.stem}.txt"):
-        if t is not None and t.is_file():
-            return t
-    if base.exists():
-        for t in base.rglob(f"{p.stem}.txt"):
+    for root in roots:
+        for t in (root / "inbox" / f"{stem}.txt", root / f"{stem}.txt"):
+            if t.is_file():
+                return t
+    if mirror is not None and mirror.is_file():
+        return mirror
+    for root in roots:
+        if not root.exists():
+            continue
+        for t in root.rglob(f"{stem}.txt"):
+            if ".media" in t.parts or t.name.endswith(".old.txt"):
+                continue
             return t
     return None
 
@@ -717,6 +728,120 @@ def _clean_goals(items: list, seen_titles: list[str]) -> tuple[list[dict], list[
     return out, dups
 
 
+def pending_files(course: str) -> list[Path]:
+    """待拆文件夹里的 txt（按课程）。文件夹就是队列：挪进来=要拆，挪出去=不拆。"""
+    base = paths.pending_dir(course)
+    if not base.exists():
+        return []
+    out = []
+    for p in sorted(base.rglob("*.txt")):
+        if p.name.endswith(".old.txt") or ".media" in p.parts:
+            continue
+        out.append(p)
+    return out
+
+
+def pending_stats(course: str) -> dict:
+    files = pending_files(course)
+    chars = 0
+    for p in files:
+        try:
+            chars += len(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return {"files": len(files), "chars": chars,
+            "blocks": (chars + DERIVE_CHARS - 1) // DERIVE_CHARS}
+
+
+def _move_to_done(course: str, files: list[Path]) -> int:
+    """拆成功后把用到的 txt 从 待拆/ 挪到 已拆/（保留子目录；检索仍然扫得到）。"""
+    base = paths.pending_dir(course)
+    done = paths.done_dir(course)
+    changed: dict[str, str] = {}
+    for p in files:
+        try:
+            rel = p.relative_to(base)
+        except ValueError:
+            rel = Path(p.name)
+        dst = done / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            dst = dst.with_name(f"{dst.stem}-{now().strftime('%H%M%S')}{dst.suffix}")
+        try:
+            shutil.move(str(p), str(dst))
+        except OSError:
+            continue
+        changed[str(p)] = str(dst)
+    if changed:
+        m = _manifest_read()
+        for it in m["items"]:
+            t = str(it.get("text") or "")
+            if t in changed:
+                it["text"] = changed[t]
+        _manifest_write(m)
+        try:
+            import retrieval as _r
+            _r._BLOCKS = None          # 路径变了，检索块要重算
+        except Exception:  # noqa: BLE001
+            pass
+    return len(changed)
+
+
+def migrate_pending_layout(db=None) -> int:
+    """把老布局的 txt 挪进 待拆/<课>/（保留子目录）。
+
+    老布局：extracted/inbox、extracted/书、extracted/笔记…（都归 ds）；
+    新布局：extracted/待拆/ds/inbox/…、extracted/已拆/ds/…
+    幂等：待拆/已拆 下面的不再动。
+    """
+    root = paths.extracted_dir(None)
+    if not root.exists():
+        return 0
+    cids = {c["id"] for c in db.courses()} if db is not None else {"ds"}
+    legacy = {"inbox", "PPT", "书", "作业", "笔记", "试卷", "大作业", "考试题型或复习大纲"}
+    changed: dict[str, str] = {}
+
+    def take(p: Path, cid: str, rel: Path) -> None:
+        if p.name.endswith(".old.txt") or ".media" in p.parts:
+            return
+        dst = paths.pending_dir(cid) / rel
+        if dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(p), str(dst))
+        except OSError:
+            return
+        changed[str(p)] = str(dst)
+
+    for top in sorted(root.iterdir()):
+        if top.is_file():
+            if top.suffix.lower() == ".txt":
+                take(top, "ds", Path(top.name))
+            continue
+        if top.name in ("待拆", "已拆"):
+            continue
+        if top.name in cids:                 # extracted/<课>/…
+            for p in sorted(top.rglob("*.txt")):
+                take(p, top.name, p.relative_to(top))
+        elif top.name in legacy:             # extracted/inbox、extracted/书…（都归 ds）
+            for p in sorted(top.rglob("*.txt")):
+                take(p, "ds", p.relative_to(root))
+    if changed:
+        m = _manifest_read()
+        for it in m["items"]:
+            t = str(it.get("text") or "")
+            if t in changed:
+                it["text"] = changed[t]
+        _manifest_write(m)
+        try:
+            import retrieval as _r
+            _r._BLOCKS = None
+        except Exception:  # noqa: BLE001
+            pass
+    return len(changed)
+
+
 def new_materials(db, course: str) -> list[dict]:
     """上次拆目标之后新入库、且还没被拆过的资料。"""
     since = db.get(f"goals_derived_at:{course}", "")
@@ -725,11 +850,12 @@ def new_materials(db, course: str) -> list[dict]:
     return [m for m in rows if not since or (m.get("imported_at") or "") > since]
 
 
-def derive_goals(db, course: str | None = None, progress=None) -> dict:
-    """把新入库的资料拆成目标 → 写 goals_<课>.json 和库 → 重排 → 返回 diff。
+def derive_goals(db, course: str | None = None, files: list[Path] | None = None,
+                 progress=None) -> dict:
+    """把「待拆」里选中的 txt 拆成目标 → 写 goals_<课>.json 和库 → 重排 → 挪到已拆。
 
-    只处理 `goals_derived_at:<课>` 之后入库的资料，没新资料就不花钱。
-    模型失败就抛错、**一个目标都不写**（凭空编目标比没有更糟）。
+    files 为 None 时拆待拆文件夹里全部；传了只拆这几份（UI 勾选用）。
+    模型失败就抛错、**一个目标都不写**；拆成功才挪 txt。
     """
     if getattr(db, "remote", False):              # 瘦客户端：拆目标在服务器上跑
         return db.action("goals/derive", course=course or "")["result"]
@@ -737,26 +863,31 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
     cid = course or db.current_course()
     c = db.course(cid) or {}
     name = c.get("name") or cid
-    new = new_materials(db, cid)
-    if not new:
+    chosen = [Path(x) for x in files] if files else pending_files(cid)
+    chosen = [p for p in chosen if p.is_file()]
+    if not chosen:
         return {"added": 0, "titles": [], "minutes": 0, "chars": 0, "files": [],
-                "note": f"{name}：没有新资料（先放文件到 inbox，再「扫描 inbox」）"}
+                "moved": 0, "chunks": 0,
+                "note": f"{name}：待拆文件夹是空的（先处理 inbox，或把 txt 放进待拆）"}
 
-    # 按 DERIVE_CHARS 切块，一块一次模型调用；资料里没文本的跳过并记日志
+    # 按 DERIVE_CHARS 切块，一块一次模型调用；不再设「一次最多几块」，
+    # 由 UI 里勾选哪几份 + 显示预估费用来控制体量。
     chunks: list[str] = []
     cur: list[str] = []
     cur_chars = 0
-    files: list[str] = []
+    names: list[str] = []
+    used_files: list[Path] = []
     chars = 0
-    for m in new:
-        t = _text_for(cid, m["path"])
-        if t is None:
-            db.log(f"拆目标跳过 {m['path']}：找不到抽取的文本", "warn")
+    for p in chosen:
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as e:  # noqa: BLE001
+            db.log(f"拆目标跳过 {p.name}：{e}", "warn")
             continue
-        body = t.read_text(encoding="utf-8", errors="replace").strip()
         if not body:
             continue
-        files.append(t.name)
+        names.append(p.name)
+        used_files.append(p)
         chars += len(body)
         while body:
             if cur_chars >= DERIVE_CHARS:
@@ -769,10 +900,7 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
     if cur:
         chunks.append("\n\n".join(cur))
     if not chunks:
-        raise RuntimeError("新资料里没有可用文本（可能是扫描件或抽取失败）")
-    if len(chunks) > DERIVE_MAX_CHUNKS:
-        raise RuntimeError(f"新资料太多（{chars:,} 字 / {len(chunks)} 块），"
-                           f"先分批放 inbox 再拆（一次最多 {DERIVE_MAX_CHUNKS} 块）")
+        raise RuntimeError("选中的资料里没有可用文本（可能是扫描件或抽取失败）")
 
     known = db.goals(course=cid)
     subject = c.get("name") or db.get("subject") or cid
@@ -784,7 +912,8 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
             progress(f"拆目标 {i}/{len(chunks)}（{len(chunk):,} 字）…")
         msgs = [{"role": "system", "content": SYSTEM_SPLIT.format(max_goals=DERIVE_MAX_GOALS)},
                 {"role": "user", "content": _derive_user(subject, exam, known, chunk)}]
-        text = llm.chat(msgs, db=db, max_tokens=2500, temperature=0.3, timeout=180)
+        text = llm.chat(msgs, db=db, max_tokens=4000, temperature=0.3, timeout=180,
+                        extra={"thinking": {"type": "disabled"}})
         obj = llm.extract_json(text)
         items = obj.get("goals") if isinstance(obj, dict) else obj
         if not isinstance(items, list):
@@ -830,18 +959,20 @@ def derive_goals(db, course: str | None = None, progress=None) -> dict:
     db.set(f"goals_derived_at:{cid}", now().strftime("%Y-%m-%d %H:%M:%S"))
 
     plan = regenerate(db, course=cid)
+    moved = _move_to_done(cid, used_files)
     kb = write_knowledge(db, course=cid) if found else {"written": 0, "changed": 0}
     db.log(f"拆目标（{name}）：{chars:,} 字 → 新增 {len(found)} 个目标，"
-           f"来自 {len(files)} 份资料", "ok")
+           f"来自 {len(names)} 份资料；{moved} 份挪到已拆", "ok")
     if dups:
         db.log(f"拆目标（{name}）：跳过 {len(dups)} 个疑似重复："
                f"{'、'.join(dups[:8])}", "info")
-    note = plan["note"] if found else f"{name}：模型认为新资料没有需要新增的目标"
+    note = plan["note"] if found else f"{name}：模型认为选中的资料没有需要新增的目标"
     if dups:
         note += f"；跳过 {len(dups)} 个与已有目标重复的（换说法的也算）"
     return {"added": len(found), "titles": [g["title"] for g in found],
             "minutes": sum(g["m"] + 10 for g in found), "chars": chars,
-            "files": files, "note": note, "uncovered": plan.get("uncovered", 0),
+            "files": names, "moved": moved, "chunks": len(chunks),
+            "note": note, "uncovered": plan.get("uncovered", 0),
             "duplicates": len(dups),
             "knowledge": kb.get("written", 0)}
 
@@ -944,6 +1075,16 @@ def check_tools(db) -> dict:
         "tesseract": probe("tesseract", t["tesseract"] or "tesseract", ["--version"]),
         "ffmpeg": probe("ffmpeg", t["ffmpeg"] or "ffmpeg", ["-version"]),
     }
+    try:
+        import pypdfium2 as _pdfium
+        out["pdfium"] = {"ok": True,
+                         "detail": f"PDFium {getattr(_pdfium, 'PDFIUM_INFO', '')}（扫描版/加密 PDF）"}
+    except Exception as e:  # noqa: BLE001
+        out["pdfium"] = {"ok": False,
+                         "detail": f"没装 pypdfium2（扫描版/加密 PDF 用不了）：{e}"}
+    office = ex.office_available()
+    out["office"] = {"ok": bool(office),
+                     "detail": office or "没找到 Office/LibreOffice（.doc/.ppt 读不了）"}
     wse = t["whisper"] if t["whisper"] and Path(t["whisper"]).is_file() else (_sh.which("whisper-cli") or "")
     out["whisper"] = {"ok": bool(wse), "detail": wse or "没找到 whisper-cli（whisper.cpp 的命令行）"}
     model = t["whisper_model"]
@@ -983,7 +1124,7 @@ def process_inbox(db, course: str | None = None, progress=None, cancel=None,
     manifest = _manifest_read()
     done_keys = {(i.get("sha1"), i.get("course")) for i in manifest["items"]
                  if i.get("status") == "done"}
-    out_dir = paths.extracted_dir(cid) / "inbox"
+    out_dir = paths.pending_dir(cid)
     # 文本文件名 → 它属于哪份原件（sha1）。同名不同内容不能互相覆盖：
     # 比如两份都叫「第3章.pdf」，第二份会写成 第3章-<sha1前6位>.txt。
     text_owner = {str(i.get("text") or ""): i.get("sha1")
@@ -1121,7 +1262,10 @@ def process_inbox(db, course: str | None = None, progress=None, cancel=None,
 
     fast, slow = [], []
     for p in files:
-        (slow if ex.kind_of(p) in ("video", "audio") else fast).append(p)
+        # 音视频串行（whisper 吃满多核）；.doc/.ppt 也串行（Word/PowerPoint 是单实例，
+        # 4 路并行开会互相抢 COM）
+        serial = ex.kind_of(p) in ("video", "audio") or p.suffix.lower() in (".doc", ".ppt")
+        (slow if serial else fast).append(p)
 
     workers = workers or max(1, min(4, (_os.cpu_count() or 4)))
     emit("", "start")
@@ -1172,24 +1316,36 @@ def _slug(s: str, n: int = 36) -> str:
 def _goal_md(db, goal: dict, version: int) -> str:
     hits = retrieve(goal, goal.get("title", ""), 4)
     cps = goal.get("cp") or []
+    deps = goal.get("d") or []
+    cid = goal.get("course") or "ds"
+    cname = (db.course(cid) or {}).get("name") or "资料"
     lines = [
         "---",
         f"id: {goal['id']}",
+        f"course: {cid}",
+        f"course_name: {cname}",
         f"chapter: {goal.get('ch') or ''}",
         f"title: {goal.get('title') or ''}",
         f"priority: {goal.get('p') or 'core'}",
         f"minutes: {int(goal.get('m') or 30)}",
         f"version: {version}",
-        f"source: {(db.course(goal.get('course') or 'ds') or {}).get('name') or '资料'}",
+        f"source: {cname}",
+        # 知识树的边：先修用 deps，父节点 parent 先留空（以后换骨架只改这一行）
+        f"deps: {json.dumps(deps, ensure_ascii=False)}",
+        f"parent: {goal.get('parent') or ''}",
         "tags: []",
         "---",
         "",
         f"# {goal.get('title') or goal['id']}",
         "",
+        f"> {cname} · {goal.get('ch') or '未分章'} · {int(goal.get('m') or 30)} 分钟",
+        "",
         "## 要掌握（验收点）",
         "",
     ]
     lines += [f"- {c}" for c in cps] or ["- （还没有验收点）"]
+    if deps:
+        lines += ["", "## 先修", "", *[f"- {d}" for d in deps]]
     lines += ["", "## 资料摘录", ""]
     if hits:
         for e in hits:
@@ -1198,73 +1354,270 @@ def _goal_md(db, goal: dict, version: int) -> str:
     else:
         lines += ["（这门课还没有能检索到的原文）", ""]
     lines += ["## 说明", "",
-              "二级数据：只由「重新处理资料」生成，平时不手改。", ""]
+              "全库知识库的一个节点：按「章」放在同一个库里，科目写在 `course:`。",
+              "只由「拆目标 / 重建知识库」生成，平时不手改；改过的内容重建时会被覆盖。",
+              ""]
     return "\n".join(lines)
 
 
-def write_knowledge(db, course: str | None = None, goals: list[dict] | None = None) -> dict:
-    """把目标写成二级数据：`知识库/<课>/<章>/<id>-<标题>.md`。
+def _goal_hash(g: dict) -> str:
+    """目标字段指纹：章/标题/验收点/依赖/估时/优先级/科目变了才算变。"""
+    raw = json.dumps([g.get("id"), g.get("ch"), g.get("title"), g.get("p"),
+                      int(g.get("m") or 30), g.get("cp") or [], g.get("d") or [],
+                      g.get("course") or "ds"], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
-    正文 = 从原文里检索到的段落（不额外调模型，忠于资料）。
-    内容变了才重写，旧版留一份到 `知识库/.history/`，并把 version +1。
+
+_blocks_rev_cache: str | None = None
+
+
+def blocks_rev() -> str:
+    """检索块的版本：变了说明原文/切块变了，知识库的摘录要重渲染。
+
+    资料一入库 `retrieval._BLOCKS` 会被置空，这里跟着重算，不会用旧版本。
+    """
+    global _blocks_rev_cache
+    r = retrieval_mod()
+    if r is None:
+        return ""
+    if _blocks_rev_cache is not None and getattr(r, "_BLOCKS", None) is not None:
+        return _blocks_rev_cache
+    try:
+        blocks, _ = r._ensure()
+    except Exception:     # noqa: BLE001
+        return _blocks_rev_cache or ""
+    h = hashlib.sha1()
+    for b in blocks:
+        h.update((b.get("rel") or "").encode())
+        h.update(b"|")
+        h.update((b.get("anchor") or "").encode())
+        h.update(b"|")
+        h.update(str(len(b.get("text") or "")).encode())
+    _blocks_rev_cache = h.hexdigest()[:16]
+    return _blocks_rev_cache
+
+
+def _kb_archive(base: Path, path: Path, rel: Path | None = None) -> None:
+    """旧文件留一份到 `知识库/.history/<时间戳>/`（不是删）。"""
+    try:
+        rel = rel or path.relative_to(base)
+    except ValueError:
+        rel = Path(path.name)
+    hist = base / ".history" / now().strftime("%Y%m%d-%H%M%S") / rel
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(path, hist)
+    except OSError:
+        pass
+
+
+def _mastery_map(db) -> dict[str, dict]:
+    """每个目标的掌握状态，给 `_树.json` 用（不进 md：状态一变就升版本太吵）。
+
+    done  = 有卡完成过（小测过了）
+    attempts / passed = 累计答题次数 / 通过次数；last = 最近一次答题时间
+    quiz  = 题库里出了几道题
+    """
+    out: dict[str, dict] = {}
+    try:
+        for r in db.q("SELECT goal_id, COUNT(*) AS n, SUM(passed) AS p, "
+                      "MAX(created_at) AS last FROM attempts "
+                      "WHERE goal_id IS NOT NULL AND goal_id<>'' GROUP BY goal_id"):
+            out[r["goal_id"]] = {"attempts": int(r["n"] or 0), "passed": int(r["p"] or 0),
+                                 "last": r["last"] or ""}
+    except Exception:  # noqa: BLE001 老库/远端没有 attempts 也不该把树写挂
+        pass
+    try:
+        for r in db.q("SELECT goal_id, COUNT(*) AS n FROM quiz GROUP BY goal_id"):
+            out.setdefault(r["goal_id"], {})["quiz"] = int(r["n"] or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for gid in db.done_goal_ids():
+            out.setdefault(gid, {})["done"] = True
+    except Exception:  # noqa: BLE001
+        pass
+    for v in out.values():
+        v.setdefault("attempts", 0)
+        v.setdefault("passed", 0)
+        v.setdefault("last", "")
+        v.setdefault("quiz", 0)
+        v.setdefault("done", v["passed"] > 0)
+    return out
+
+
+def _kb_disk_paths(base: Path) -> set[str]:
+    """一次扫一遍目录名（**不读文件内容**），给增量重建判断「文件还在不在」。
+
+    比逐个 `dst.is_file()` 快一个量级：2000 个节点 10 个目录，几次 scandir 就够。
+    """
+    out: set[str] = set()
+    if not base.exists():
+        return out
+    try:
+        for d in base.iterdir():
+            if not d.is_dir() or d.name.startswith("_"):
+                continue
+            for f in d.iterdir():
+                if f.suffix == ".md":
+                    out.add(f"{d.name}/{f.name}")
+    except OSError:
+        pass
+    return out
+
+
+def write_knowledge(db, course: str | None = None, goals: list[dict] | None = None) -> dict:
+    """**增量**重建全库知识库：只重写变了的那几个节点。
+
+    跳过条件（三条全满足）：目标指纹没变、检索块版本没变、md 文件还在。
+    表 `kb_nodes` 是索引，md 是导出物——所以「什么都没变」时是 **0 次检索、0 次写文件**。
     """
     if getattr(db, "remote", False):
-        return {"written": 0, "changed": 0}
-    cid = course or db.current_course()
-    rows = goals if goals is not None else db.goals(course=cid)
-    base = paths.knowledge_dir(cid)
-    written = changed = 0
+        return {"written": 0, "changed": 0, "orphaned": 0, "skipped": 0, "moved": 0}
+    base = paths.knowledge_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    rows = goals if goals is not None else db.goals(course=course)
+    brev = blocks_rev()
+    existing = {r["id"]: r for r in db.kb_nodes()}
+    on_disk = _kb_disk_paths(base)
+    written = changed = moved = skipped = 0
+    order: list[str] = []
     for g in rows:
-        ch = _slug(g.get("ch") or "未分章", 20)
-        name = f"{g['id']}-{_slug(g.get('title') or 'goal')}.md"
-        dst = base / ch / name
-        rel = dst.relative_to(base)
-        old_ver = 0
-        if dst.exists():
-            try:
-                head = dst.read_text(encoding="utf-8")[:400]
-                m = re.search(r"^version:\s*(\d+)", head, re.M)
-                old_ver = int(m.group(1)) if m else 1
-                old_body = dst.read_text(encoding="utf-8")
-            except (OSError, ValueError):
-                old_ver, old_body = 0, ""
-        else:
-            old_body = ""
-        text = _goal_md(db, g, old_ver or 1)
-        if old_body.strip() == text.strip():
-            continue                              # 没变就别动
-        if old_body:
-            text = _goal_md(db, g, old_ver + 1)   # 内容真变了才升版本
-            hist = base / ".history" / now().strftime("%Y%m%d-%H%M%S") / rel
-            hist.parent.mkdir(parents=True, exist_ok=True)
-            hist.write_text(old_body, encoding="utf-8")
-            changed += 1
+        gid = g["id"]
+        ch = g.get("ch") or "未分章"
+        if ch not in order:
+            order.append(ch)
+        gh = _goal_hash(g)
+        rel = f"{_slug(ch, 20)}/{gid}-{_slug(g.get('title') or 'goal')}.md"
+        dst = base / rel
+        old = existing.get(gid)
+        if (old and old["goal_hash"] == gh and old["blocks_rev"] == brev
+                and old["path"] == rel and rel in on_disk):
+            skipped += 1
+            continue
+        old_ver = int(old["version"] or 1) if old else 0
+        if old and old["path"] != rel:
+            # 章名或标题变了：旧文件进历史、按新路径重写，版本接着涨
+            old_path = base / old["path"]
+            if old_path.is_file():
+                _kb_archive(base, old_path, Path(old["path"]))
+                try:
+                    old_path.unlink()
+                except OSError:
+                    pass
+            moved += 1
+        elif old and dst.is_file():
+            _kb_archive(base, dst, Path(rel))
+        ver = old_ver + 1 if old_ver else 1
+        text = _goal_md(db, g, ver)
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(text, encoding="utf-8")
+        db.kb_save_node(gid, course=g.get("course") or "ds", chapter=ch,
+                        title=g.get("title") or gid, minutes=int(g.get("m") or 30),
+                        path=rel, version=ver, goal_hash=gh, blocks_rev=brev,
+                        body_hash=hashlib.sha1(text.encode("utf-8")).hexdigest())
         written += 1
-    _write_kb_index(db, cid, base, rows)
-    if written:
-        db.log(f"知识库（{cid}）：写/更新 {written} 个目标（{changed} 个是改版）", "ok")
-    return {"written": written, "changed": changed, "dir": str(base)}
+        if old_ver:
+            changed += 1
+
+    # 孤儿：索引里有、目标已经没了。只在目标非空时清理（防止库空了被当「全删了」）。
+    all_rows = db.goals()
+    all_ids = {g["id"] for g in all_rows}
+    orphaned = 0
+    if all_ids:
+        dead: list[str] = []
+        for k in db.kb_nodes():
+            if k["id"] in all_ids:
+                continue
+            p = base / k["path"]
+            if p.is_file():
+                _kb_archive(base, p, Path(k["path"]))
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            dead.append(k["id"])
+        orphaned = len(dead)
+        db.kb_delete_nodes(dead)
+
+    # 章节顺序按「目标在课程里的出现顺序」，不是章名字典序
+    if order:
+        db.kb_set_meta("chapter_order", json.dumps(order, ensure_ascii=False))
+    _write_kb_index(db)
+    if written or orphaned:
+        db.log(f"知识库（增量）：重写 {written} 个节点（{skipped} 个没变跳过"
+               + (f"，{moved} 个换章/改名" if moved else "")
+               + (f"，清理 {orphaned} 个孤儿" if orphaned else "") + "）", "ok")
+    return {"written": written, "changed": changed, "orphaned": orphaned,
+            "skipped": skipped, "moved": moved, "dir": str(base)}
 
 
-def _write_kb_index(db, cid: str, base: Path, rows: list[dict]) -> None:
-    """生成一份人看的索引：章节 → 目标。"""
-    name = (db.course(cid) or {}).get("name") or cid
-    lines = [f"# {name} · 知识库索引", "",
-             f"> 生成于 {now().strftime('%Y-%m-%d %H:%M')}，共 {len(rows)} 个目标。", ""]
+def _write_kb_index(db) -> None:
+    """从 `kb_nodes` 生成全库 `_索引.md` + `_树.json`。内容没变（rev 一样）就不写文件。"""
+    base = paths.knowledge_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    nodes_db = db.kb_nodes()
+    goals = {g["id"]: g for g in db.goals()}
+    mastery = _mastery_map(db)
+    names = {c["id"]: (c.get("name") or c["id"]) for c in db.courses()}
+    try:
+        order = json.loads(db.kb_meta("chapter_order", "[]"))
+    except ValueError:
+        order = []
+    rank = {ch: i for i, ch in enumerate(order)}
+
+    def node_of(n: dict) -> dict:
+        g = goals.get(n["id"]) or {}
+        st = mastery.get(n["id"], {})
+        return {"id": n["id"], "course": n["course"] or "ds",
+                "course_name": names.get(n["course"] or "ds", n["course"] or "ds"),
+                "chapter": n["chapter"] or "未分章", "title": n["title"] or n["id"],
+                "priority": g.get("p") or "core", "minutes": int(n["minutes"] or 30),
+                "deps": [d for d in (g.get("d") or []) if d],
+                "parent": g.get("parent") or "",
+                "path": n["path"], "version": int(n["version"] or 1),
+                "done": bool(st.get("done")), "attempts": st.get("attempts", 0),
+                "passed": st.get("passed", 0), "quiz": st.get("quiz", 0),
+                "last_attempt": st.get("last", "")}
+
+    nodes = [node_of(n) for n in sorted(
+        nodes_db, key=lambda x: (rank.get(x["chapter"] or "未分章", 999),
+                                 x["course"] or "", x["id"]))]
+    id_set = {n["id"] for n in nodes}
+    edges = [{"from": d, "to": n["id"], "kind": "dep"}
+             for n in nodes for d in n["deps"] if d]
+    rev = hashlib.sha1("|".join(
+        f'{n["id"]}:{n["version"]}:{int(n["done"])}' for n in nodes).encode()).hexdigest()[:16]
+    if db.kb_meta("index_rev") == rev and (base / "_索引.md").is_file():
+        return                                     # 没变化，别重写 1MB 的 JSON
     by_ch: dict[str, list[dict]] = {}
-    for g in rows:
-        by_ch.setdefault(g.get("ch") or "未分章", []).append(g)
-    for ch, items in by_ch.items():
+    for n in nodes:
+        by_ch.setdefault(n["chapter"], []).append(n)
+    lines = [f"# 全库知识库 · 索引", "",
+             f"> 生成于 {now().strftime('%Y-%m-%d %H:%M')}，共 {len(nodes)} 个节点 / "
+             f"{len(by_ch)} 章 / {len({n['course'] for n in nodes})} 门课。", "",
+             "> 不分科目：同一个库里按「章」排，科目写在每篇的 `course:` 里。", ""]
+    for ch in by_ch:
         lines.append(f"## {ch}")
         lines.append("")
-        for g in items:
-            f = f"{_slug(ch, 20)}/{g['id']}-{_slug(g.get('title') or 'goal')}.md"
-            lines.append(f"- [{g['id']} {g.get('title', '')}]({f}) · {int(g.get('m') or 30)} 分钟")
+        for n in by_ch[ch]:
+            lines.append(f"- [{n['id']} {n['title']}]({n['path']}) · "
+                         f"{n['minutes']} 分钟 · `{n['course']}`")
         lines.append("")
-    base.mkdir(parents=True, exist_ok=True)
     (base / "_索引.md").write_text("\n".join(lines), encoding="utf-8")
+
+    tree = {"generated_at": now().strftime("%Y-%m-%d %H:%M:%S"),
+            "root": "知识库",
+            "note": "一个知识库：节点按章归组，course 只是属性；edges 是先修边。parent 留空给以后换骨架。",
+            "chapter_order": list(by_ch),
+            "stats": {"nodes": len(nodes), "edges": len(edges), "chapters": len(by_ch),
+                      "courses": len({n["course"] for n in nodes}),
+                      "done": sum(1 for n in nodes if n["done"])},
+            "nodes": nodes, "edges": edges,
+            "missing_deps": sorted({e["from"] for e in edges} - id_set)}
+    (base / "_树.json").write_text(json.dumps(tree, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
+    db.kb_set_meta("index_rev", rev)
 
 
 def _front_matter(text: str) -> dict:
@@ -1281,29 +1634,53 @@ def _front_matter(text: str) -> dict:
     return out
 
 
-def knowledge_list(course: str | None = None) -> list[dict]:
-    """知识库里有哪些目标（只读文件，不碰库）。按章节、id 排。"""
-    base = paths.knowledge_dir(course or "ds")
-    rows: list[dict] = []
-    if not base.exists():
-        return rows
-    for p in base.rglob("*.md"):
-        if p.name == "_索引.md" or ".history" in p.parts:
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        meta = _front_matter(text)
-        try:
-            minutes = int(meta.get("minutes") or 0)
-        except ValueError:
-            minutes = 0
-        rows.append({"id": meta.get("id") or p.stem, "title": meta.get("title") or p.stem,
-                     "chapter": meta.get("chapter") or "未分章", "minutes": minutes,
-                     "version": meta.get("version") or "", "path": str(p)})
-    rows.sort(key=lambda r: (r["chapter"], r["id"]))
+def knowledge_list(db, course: str | None = None,
+                   chapter: str | None = None) -> list[dict]:
+    """知识库有哪些节点——**查 `kb_nodes` 索引**，不扫文件（2000 节点毫秒级）。
+
+    course / chapter 给定就只返回那一块（知识库页按章懒加载用）。
+    路径返回绝对路径，方便直接读 md。
+    """
+    if getattr(db, "remote", False):
+        return []
+    base = paths.knowledge_dir()
+    rank = _chapter_rank(db)
+    rows = db.kb_nodes(chapter=chapter, course=course)
+    out = [{"id": r["id"], "title": r["title"], "chapter": r["chapter"] or "未分章",
+            "minutes": int(r["minutes"] or 0), "version": r["version"],
+            "course": r["course"] or "ds", "course_name": r["course"] or "ds",
+            "path": str(base / r["path"])} for r in rows]
+    out.sort(key=lambda r: (rank.get(r["chapter"], 999), r["chapter"], r["course"], r["id"]))
+    return out
+
+
+def kb_chapters(db) -> list[dict]:
+    """先列章（每章几个节点），知识库页展开时才拉节点。"""
+    if getattr(db, "remote", False):
+        return []
+    rank = _chapter_rank(db)
+    rows = db.kb_chapters()
+    rows.sort(key=lambda r: (rank.get(r["chapter"], 999), r["chapter"]))
     return rows
+
+
+def kb_count(db, course: str | None = None) -> int:
+    """知识库节点数（资料页统计用，一条 SQL）。"""
+    if getattr(db, "remote", False):
+        return 0
+    return db.kb_count(course)
+
+
+def _chapter_rank(db) -> dict[str, int]:
+    """章节显示顺序：`kb_meta.chapter_order`（目标在课程里的出现顺序）。
+
+    中文按字典序是「图 / 堆 / 复杂度」，跟学习顺序完全不一样。
+    """
+    try:
+        order = json.loads(db.kb_meta("chapter_order", "[]"))
+    except (TypeError, ValueError):
+        return {}
+    return {ch: i for i, ch in enumerate(order) if isinstance(ch, str)}
 
 
 def knowledge_read(path: str | Path) -> str:
